@@ -16,6 +16,7 @@ const app = express();
 const PORT = process.env.PORT ?? 3001;
 
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 const corsOrigins = (process.env.CORS_ORIGIN ?? '')
   .split(',')
@@ -45,6 +46,10 @@ app.use('/api/reply-templates', replyTemplatesRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.get('/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 

@@ -75,6 +75,36 @@ body {
   font-family: 'Space Grotesk', 'Noto Sans SC', sans-serif;
 }
 
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #eef2ff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.status-pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #9ca3af;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+}
+
+.status-pill.status-ok .dot {
+  background: #22c55e;
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.7);
+}
+
+.status-pill.status-bad .dot {
+  background: #f97316;
+  box-shadow: 0 0 12px rgba(249, 115, 22, 0.7);
+}
+
 .app-content {
   max-width: 1200px;
   margin: 0 auto;
@@ -194,6 +224,10 @@ body {
     flex-direction: column;
     align-items: flex-start;
     height: auto;
+  }
+
+  .status-pill {
+    margin-top: 8px;
   }
 
   .app-content {

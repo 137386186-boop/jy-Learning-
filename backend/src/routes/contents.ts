@@ -26,6 +26,7 @@ router.get('/', async (req: Request, res: Response) => {
     const platformId = req.query.platformId as string | undefined;
     const contentType = req.query.contentType as string | undefined;
     const keyword = req.query.keyword as string | undefined;
+    const replied = req.query.replied as string | undefined;
     const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
     const pageSize = Math.min(
       MAX_PAGE_SIZE,
@@ -34,6 +35,8 @@ router.get('/', async (req: Request, res: Response) => {
     const where: Record<string, unknown> = {};
     if (platformId) where.platformId = platformId;
     if (contentType === 'post' || contentType === 'comment') where.contentType = contentType;
+    if (replied === 'true') where.replied = true;
+    if (replied === 'false') where.replied = false;
     if (keyword && keyword.trim()) {
       const k = keyword.trim();
       where.OR = [

@@ -35,6 +35,7 @@ export default function ContentList() {
   const platformId = searchParams.get('platformId') || undefined;
   const contentType = searchParams.get('contentType') || undefined;
   const keyword = searchParams.get('keyword') || '';
+  const replied = searchParams.get('replied') || undefined;
   const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
 
   const [platforms, setPlatforms] = useState<Platform[]>([]);
@@ -76,6 +77,7 @@ export default function ContentList() {
     const params = new URLSearchParams();
     if (platformId) params.set('platformId', platformId);
     if (contentType) params.set('contentType', contentType);
+    if (replied) params.set('replied', replied);
     if (keyword) params.set('keyword', keyword);
     params.set('page', String(page));
     params.set('pageSize', String(PAGE_SIZE));
@@ -100,6 +102,7 @@ export default function ContentList() {
 
   const totalLabel = total ? total.toLocaleString('zh-CN') : '0';
   const platformCount = platforms.length;
+  const repliedLabel = replied === 'true' ? '已回复' : replied === 'false' ? '待回复' : '全部';
 
   return (
     <div>
@@ -118,10 +121,14 @@ export default function ContentList() {
             <strong className="stat-value">{platformCount}</strong>
           </div>
           <div className="stat-card">
-            <span className="stat-label">当前筛选</span>
+            <span className="stat-label">类型筛选</span>
             <strong className="stat-value">
               {contentType ? (contentType === 'comment' ? '评论' : '帖子') : '全部'}
             </strong>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">回复状态</span>
+            <strong className="stat-value">{repliedLabel}</strong>
           </div>
         </div>
       </div>
@@ -144,6 +151,17 @@ export default function ContentList() {
           options={[
             { label: '帖子', value: 'post' },
             { label: '评论', value: 'comment' },
+          ]}
+        />
+        <Select
+          placeholder="回复"
+          allowClear
+          style={{ width: 120 }}
+          value={replied}
+          onChange={(v) => updateParams({ replied: v, page: '1' })}
+          options={[
+            { label: '已回复', value: 'true' },
+            { label: '待回复', value: 'false' },
           ]}
         />
         <Input.Search
@@ -205,8 +223,14 @@ export default function ContentList() {
                       评 {item.commentCount}
                     </Typography.Text>
                   )}
-                  {item.replied && (
-                    <Tag color="green" style={{ marginLeft: 8 }}>已回复</Tag>
+                  {item.replied ? (
+                    <Tag color="green" style={{ marginLeft: 8 }}>
+                      已回复
+                    </Tag>
+                  ) : (
+                    <Tag color="orange" style={{ marginLeft: 8 }}>
+                      待回复
+                    </Tag>
                   )}
                 </div>
               </Card>
