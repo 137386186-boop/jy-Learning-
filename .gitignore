@@ -1,0 +1,15 @@
+.env
+node_modules
+dist
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite
+.cache
+coverage
+*.tsbuildinfo
+backend/.prisma
+backend/prisma/dev.db

@@ -1,0 +1,15 @@
+{
+  "name": "学术内容聚合平台",
+  "short_name": "学术聚合",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0D1321",
+  "theme_color": "#0D1321",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

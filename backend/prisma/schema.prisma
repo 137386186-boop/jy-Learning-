@@ -1,0 +1,127 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum ContentType {
+  post
+  comment
+}
+
+model Platform {
+  id        String        @id @default(cuid())
+  name      String
+  slug      String        @unique
+  iconUrl   String?       @map("icon_url")
+  enabled   Boolean       @default(true)
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+  contents  Content[]
+  crawlLogs CrawlLog[]
+  auth      PlatformAuth?
+}
+
+model PlatformAuth {
+  id           String    @id @default(cuid())
+  platformId   String    @unique @map("platform_id")
+  platform     Platform  @relation(fields: [platformId], references: [id])
+  status       String    @default("unauthed")
+  authorizedAt DateTime? @map("authorized_at")
+  note         String?
+  accessToken  String?    @map("access_token") @db.Text
+  refreshToken String?    @map("refresh_token") @db.Text
+  expiresAt    DateTime?  @map("expires_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+}
+
+model Keyword {
+  id        String   @id @default(cuid())
+  word      String   @unique
+  isCore    Boolean  @default(false) @map("is_core")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+}
+
+model Content {
+  id                String      @id @default(cuid())
+  platformId        String      @map("platform_id")
+  platform          Platform    @relation(fields: [platformId], references: [id])
+  contentType       ContentType @default(post) @map("content_type")
+  platformContentId String?     @map("platform_content_id")
+  authorName        String      @map("author_name")
+  authorId          String?     @map("author_id")
+  authorAvatar      String?     @map("author_avatar")
+  body              String      @db.Text
+  bodyMd5           String      @map("body_md5")
+  publishedAt       DateTime    @map("published_at")
+  sourceUrl         String      @map("source_url")
+  keywordTags       String[]    @map("keyword_tags")
+  likeCount         Int?        @map("like_count")
+  commentCount      Int?        @map("comment_count")
+  replied           Boolean     @default(false) @map("replied")
+  repliedAt         DateTime?   @map("replied_at")
+  summary           String?     @db.VarChar(200)
+  crawlStatus       String      @default("success") @map("crawl_status")
+  createdAt         DateTime    @default(now()) @map("created_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+  complaints        Complaint[]
+
+  @@unique([platformId, publishedAt, bodyMd5])
+  @@index([platformId, publishedAt])
+  @@index([publishedAt])
+  @@index([keywordTags])
+}
+
+model ReplyTemplate {
+  id        String   @id @default(cuid())
+  title     String
+  content   String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+}
+
+model CrawlConfig {
+  id              String    @id @default(cuid())
+  intervalMinutes Int       @default(120) @map("interval_minutes")
+  lastRunAt       DateTime? @map("last_run_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+}
+
+model CrawlLog {
+  id         String   @id @default(cuid())
+  platformId String   @map("platform_id")
+  platform   Platform @relation(fields: [platformId], references: [id])
+  status     String
+  reason     String?  @db.Text
+  itemCount  Int?     @map("item_count")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([platformId, createdAt])
+}
+
+model Complaint {
+  id        String   @id @default(cuid())
+  contentId String?  @map("content_id")
+  content   Content? @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  link      String
+  reason    String?  @db.Text
+  status    String   @default("pending")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([contentId])
+}
+
+model Admin {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+}

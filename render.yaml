@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: academic-content-platform-api
+    env: node
+    plan: starter
+    rootDir: backend
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: npm run start
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        value: "REPLACE_WITH_DATABASE_URL"
+      - key: DIRECT_URL
+        value: "REPLACE_WITH_DIRECT_URL"
+      - key: JWT_SECRET
+        value: "REPLACE_WITH_RANDOM_SECRET"
+      - key: ADMIN_PASSWORD
+        value: "REPLACE_WITH_ADMIN_PASSWORD"
+      - key: ADMIN_USERNAME
+        value: "admin"
+      - key: ADMIN_FORCE_RESET
+        value: "false"
+      - key: CORS_ORIGIN
+        value: "https://jylearning.com,https://www.jylearning.com"
+      - key: FRONTEND_ORIGIN
+        value: "https://jylearning.com"
+      - key: ZHIHU_CLIENT_ID
+        value: ""
+      - key: ZHIHU_CLIENT_SECRET
+        value: ""
