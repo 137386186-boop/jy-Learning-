@@ -1,19 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Card, Button, Input, Select, Typography, Spin, message, App, Space, Alert } from 'antd';
+import { Card, Button, Input, Typography, Spin, message, App, Alert } from 'antd';
 import dayjs from 'dayjs';
-import { getAdminToken } from '../api/admin';
+import { adminFetch, getAdminToken } from '../api/admin';
 import { API_BASE } from '../api/base';
 
 const API = `${API_BASE}/contents`;
 const REPLY_API = `${API_BASE}/reply`;
-const TEMPLATES_API = `${API_BASE}/reply-templates`;
-
-interface ReplyTemplate {
-  id: string;
-  title: string;
-  content: string;
-}
 
 interface ContentDetailType {
   id: string;
@@ -33,25 +26,22 @@ interface ContentDetailType {
   platform: { id: string; name: string; slug: string };
 }
 
+interface PlatformAuthInfo {
+  id: string;
+  name: string;
+  slug: string;
+  oauthSupported: boolean;
+  authStatus: string;
+  authorizedAt: string | null;
+}
+
 export default function ContentDetail() {
   const { id } = useParams<{ id: string }>();
   const [detail, setDetail] = useState<ContentDetailType | null>(null);
   const [loading, setLoading] = useState(true);
   const [replyText, setReplyText] = useState('');
   const [replyLoading, setReplyLoading] = useState(false);
-  const [templates, setTemplates] = useState<ReplyTemplate[]>([]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch(TEMPLATES_API, { signal: controller.signal })
-      .then((r) => r.json())
-      .then((data) => setTemplates(Array.isArray(data) ? data : []))
-      .catch((e) => {
-        if (e?.name === 'AbortError') return;
-        setTemplates([]);
-      });
-    return () => controller.abort();
-  }, []);
+  const [platformAuth, setPlatformAuth] = useState<PlatformAuthInfo | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -71,6 +61,26 @@ export default function ContentDetail() {
     return () => controller.abort();
   }, [id]);
 
+  useEffect(() => {
+    if (!detail || !getAdminToken()) {
+      setPlatformAuth(null);
+      return;
+    }
+    adminFetch(`${API_BASE}/admin/platform-auth`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => {
+        if (!Array.isArray(data)) {
+          setPlatformAuth(null);
+          return;
+        }
+        const matched = data.find(
+          (p: PlatformAuthInfo) => p.id === detail.platform?.id || p.slug === detail.platform?.slug
+        );
+        setPlatformAuth(matched || null);
+      })
+      .catch(() => setPlatformAuth(null));
+  }, [detail]);
+
   const copyLink = () => {
     if (!detail?.sourceUrl) return;
     navigator.clipboard.writeText(detail.sourceUrl);
@@ -78,6 +88,8 @@ export default function ContentDetail() {
   };
 
   const sendReply = async () => {
+    const canReply =
+      platformAuth?.oauthSupported && platformAuth?.authStatus === 'authed';
     if (!id || !replyText.trim()) {
       message.warning('请输入回复内容');
       return;
@@ -85,6 +97,10 @@ export default function ContentDetail() {
     const token = getAdminToken();
     if (!token) {
       message.warning('请先在管理后台登录');
+      return;
+    }
+    if (!canReply) {
+      message.warning('当前平台未完成授权或暂不支持自动回复');
       return;
     }
     setReplyLoading(true);
@@ -130,6 +146,10 @@ export default function ContentDetail() {
     );
   }
 
+  const isComment = detail.contentType === 'comment';
+  const commentId = detail.platformContentId || '';
+  const hasCommentAnchor = isComment && commentId && detail.sourceUrl?.includes(commentId);
+
   return (
     <App>
       <div>
@@ -153,6 +173,11 @@ export default function ContentDetail() {
             {detail.authorId && ` (${detail.authorId})`} ·{' '}
             {dayjs(detail.publishedAt).format('YYYY-MM-DD HH:mm')}
           </Typography.Paragraph>
+          {detail.platformContentId && (
+            <Typography.Paragraph type="secondary">
+              平台内容 ID：{detail.platformContentId}
+            </Typography.Paragraph>
+          )}
           <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
             {detail.body}
           </Typography.Paragraph>
@@ -185,12 +210,23 @@ export default function ContentDetail() {
             <a href={detail.sourceUrl} target="_blank" rel="noopener noreferrer">
               跳转原平台
             </a>
+            <Typography.Text type="secondary" style={{ marginLeft: 12 }}>
+              {detail.sourceUrl}
+            </Typography.Text>
           </div>
+          {isComment && !hasCommentAnchor && (
+            <Alert
+              type="warning"
+              message="该评论链接未包含评论定位参数，建议导入时提供精确评论链接。"
+              showIcon
+              style={{ marginTop: 12 }}
+            />
+          )}
         </Card>
 
         <Card title="快速回复" style={{ marginTop: 16 }} className="detail-card">
           <Typography.Paragraph type="secondary">
-            以已授权的平台账号在该内容下发评论（需先在「平台授权」完成知乎授权）。
+            将以 {detail.platform?.name} 的授权账号身份回复该内容。
           </Typography.Paragraph>
           {!getAdminToken() && (
             <Alert
@@ -201,20 +237,22 @@ export default function ContentDetail() {
               action={<Link to="/admin">去登录</Link>}
             />
           )}
-          {templates.length > 0 && (
-            <Space style={{ marginBottom: 12 }}>
-              <Typography.Text type="secondary">使用模板：</Typography.Text>
-              <Select
-                placeholder="选择回复模板"
-                allowClear
-                style={{ width: 200 }}
-                options={templates.map((t) => ({ label: t.title, value: t.id }))}
-                onChange={(id) => {
-                  const t = templates.find((x) => x.id === id);
-                  if (t) setReplyText(t.content);
-                }}
-              />
-            </Space>
+          {getAdminToken() && platformAuth && !platformAuth.oauthSupported && (
+            <Alert
+              type="info"
+              message={`该平台暂不支持自动回复（${detail.platform?.name}）`}
+              showIcon
+              style={{ marginBottom: 12 }}
+            />
+          )}
+          {getAdminToken() && platformAuth?.oauthSupported && platformAuth.authStatus !== 'authed' && (
+            <Alert
+              type="warning"
+              message={`尚未完成 ${detail.platform?.name} 授权，无法自动回复`}
+              showIcon
+              style={{ marginBottom: 12 }}
+              action={<Link to="/admin/oauth">去授权</Link>}
+            />
           )}
           <Input.TextArea
             rows={4}
@@ -223,7 +261,12 @@ export default function ContentDetail() {
             onChange={(e) => setReplyText(e.target.value)}
             style={{ marginBottom: 12 }}
           />
-          <Button type="primary" onClick={sendReply} loading={replyLoading}>
+          <Button
+            type="primary"
+            onClick={sendReply}
+            loading={replyLoading}
+            disabled={!platformAuth || !platformAuth.oauthSupported || platformAuth.authStatus !== 'authed'}
+          >
             发送回复
           </Button>
         </Card>

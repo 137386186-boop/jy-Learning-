@@ -27,6 +27,8 @@ router.get('/', async (req: Request, res: Response) => {
     const contentType = req.query.contentType as string | undefined;
     const keyword = req.query.keyword as string | undefined;
     const replied = req.query.replied as string | undefined;
+    const publishedFrom = req.query.publishedFrom as string | undefined;
+    const publishedTo = req.query.publishedTo as string | undefined;
     const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
     const pageSize = Math.min(
       MAX_PAGE_SIZE,
@@ -37,6 +39,14 @@ router.get('/', async (req: Request, res: Response) => {
     if (contentType === 'post' || contentType === 'comment') where.contentType = contentType;
     if (replied === 'true') where.replied = true;
     if (replied === 'false') where.replied = false;
+    if (publishedFrom || publishedTo) {
+      const gte = publishedFrom ? new Date(publishedFrom) : null;
+      const lte = publishedTo ? new Date(publishedTo) : null;
+      const dateFilter: Record<string, Date> = {};
+      if (gte && !Number.isNaN(gte.getTime())) dateFilter.gte = gte;
+      if (lte && !Number.isNaN(lte.getTime())) dateFilter.lte = lte;
+      if (Object.keys(dateFilter).length > 0) where.publishedAt = dateFilter;
+    }
     if (keyword && keyword.trim()) {
       const k = keyword.trim();
       where.OR = [

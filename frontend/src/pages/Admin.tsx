@@ -15,162 +15,6 @@ interface AdminStats {
   contentCount: number;
   platformCount: number;
   repliedCount: number;
-  templateCount: number;
-}
-
-interface ReplyTemplate {
-  id: string;
-  title: string;
-  content: string;
-}
-
-function TemplatesPanel() {
-  const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [templates, setTemplates] = useState<ReplyTemplate[]>([]);
-  const [newTitle, setNewTitle] = useState('');
-  const [newContent, setNewContent] = useState('');
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/reply-templates`);
-      const data = await res.json();
-      setTemplates(Array.isArray(data) ? data : []);
-    } catch {
-      setTemplates([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  const saveTemplate = async (tpl: ReplyTemplate) => {
-    setSavingId(tpl.id);
-    try {
-      const res = await adminFetch(`${API_BASE}/admin/reply-templates/${tpl.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: tpl.title, content: tpl.content }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        message.error(data.error || '保存失败');
-        return;
-      }
-      setTemplates((prev) => prev.map((t) => (t.id === tpl.id ? data : t)));
-      message.success('已保存');
-    } finally {
-      setSavingId(null);
-    }
-  };
-
-  const deleteTemplate = async (id: string) => {
-    if (!window.confirm('确认删除该模板吗？')) return;
-    const res = await adminFetch(`${API_BASE}/admin/reply-templates/${id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const data = await res.json();
-      message.error(data.error || '删除失败');
-      return;
-    }
-    setTemplates((prev) => prev.filter((t) => t.id !== id));
-    message.success('已删除');
-  };
-
-  const createTemplate = async () => {
-    if (!newTitle.trim() || !newContent.trim()) {
-      message.warning('请输入标题和内容');
-      return;
-    }
-    const res = await adminFetch(`${API_BASE}/admin/reply-templates`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: newTitle.trim(), content: newContent.trim() }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      message.error(data.error || '创建失败');
-      return;
-    }
-    setTemplates((prev) => [data, ...prev]);
-    setNewTitle('');
-    setNewContent('');
-    message.success('已创建');
-  };
-
-  return (
-    <div>
-      <Card title="新增模板" style={{ marginBottom: 16 }} className="admin-card">
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          <Input
-            placeholder="模板标题"
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-          />
-          <Input.TextArea
-            placeholder="模板内容"
-            rows={3}
-            value={newContent}
-            onChange={(e) => setNewContent(e.target.value)}
-          />
-          <Button type="primary" onClick={createTemplate}>
-            创建模板
-          </Button>
-        </Space>
-      </Card>
-
-      <Card title="已有模板" className="admin-card">
-        {loading ? (
-          <div style={{ textAlign: 'center', padding: 24 }}>
-            <Spin />
-          </div>
-        ) : templates.length === 0 ? (
-          <Paragraph type="secondary">暂无模板</Paragraph>
-        ) : (
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            {templates.map((tpl) => (
-              <Card key={tpl.id} size="small" title={`模板：${tpl.title}`} className="admin-card">
-                <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                  <Input
-                    value={tpl.title}
-                    onChange={(e) =>
-                      setTemplates((prev) =>
-                        prev.map((t) => (t.id === tpl.id ? { ...t, title: e.target.value } : t))
-                      )
-                    }
-                  />
-                  <Input.TextArea
-                    rows={3}
-                    value={tpl.content}
-                    onChange={(e) =>
-                      setTemplates((prev) =>
-                        prev.map((t) => (t.id === tpl.id ? { ...t, content: e.target.value } : t))
-                      )
-                    }
-                  />
-                  <Space>
-                    <Button
-                      type="primary"
-                      onClick={() => saveTemplate(tpl)}
-                      loading={savingId === tpl.id}
-                    >
-                      保存
-                    </Button>
-                    <Button danger onClick={() => deleteTemplate(tpl.id)}>
-                      删除
-                    </Button>
-                  </Space>
-                </Space>
-              </Card>
-            ))}
-          </Space>
-        )}
-      </Card>
-    </div>
-  );
 }
 
 function ImportPanel() {
@@ -294,6 +138,22 @@ function ImportPanel() {
         errors.push(`第 ${index + 1} 条：缺少 ${missing.join(', ')}`);
         return;
       }
+      const url = String(item.sourceUrl || '');
+      try {
+        const parsed = new URL(url);
+        if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.pathname === '/') {
+          errors.push(`第 ${index + 1} 条：sourceUrl 必须是具体帖子/评论链接`);
+          return;
+        }
+      } catch {
+        errors.push(`第 ${index + 1} 条：sourceUrl 格式不正确`);
+        return;
+      }
+      const contentType = item.contentType === 'comment' ? 'comment' : 'post';
+      if (contentType === 'comment' && item.platformContentId && !url.includes(String(item.platformContentId))) {
+        errors.push(`第 ${index + 1} 条：评论链接需包含 platformContentId`);
+        return;
+      }
       valid += 1;
     });
     return { total: items.length, valid, errors: errors.slice(0, 6) };
@@ -379,6 +239,7 @@ function ImportPanel() {
     <Card title="批量导入内容" className="admin-card">
       <Paragraph type="secondary">
         支持 JSON 或 CSV 导入，字段包含 platformSlug、contentType、authorName、body、sourceUrl、publishedAt 等。
+        评论类内容建议在 sourceUrl 中包含 platformContentId，以便定位到具体评论。
       </Paragraph>
       <Radio.Group
         value={mode}
@@ -431,6 +292,74 @@ function ImportPanel() {
           开始导入
         </Button>
       </Space>
+    </Card>
+  );
+}
+
+function DataQualityPanel() {
+  const [checking, setChecking] = useState(false);
+  const [deduping, setDeduping] = useState(false);
+  const [duplicates, setDuplicates] = useState<number | null>(null);
+
+  const checkDuplicates = async () => {
+    setChecking(true);
+    try {
+      const res = await adminFetch(`${API_BASE}/admin/contents/deduplicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || '检查失败');
+        return;
+      }
+      setDuplicates(data.duplicates ?? 0);
+      message.success('已完成检查');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const runDeduplicate = async () => {
+    if (!window.confirm('将删除重复内容，是否继续？')) return;
+    setDeduping(true);
+    try {
+      const res = await adminFetch(`${API_BASE}/admin/contents/deduplicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun: false }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || '去重失败');
+        return;
+      }
+      setDuplicates(data.duplicates ?? 0);
+      message.success(`去重完成，删除 ${data.deleted ?? 0} 条`);
+    } finally {
+      setDeduping(false);
+    }
+  };
+
+  return (
+    <Card title="数据质量" className="admin-card">
+      <Paragraph type="secondary">
+        系统将按平台 + 平台内容 ID 或来源链接去重，确保列表中不出现重复内容。
+      </Paragraph>
+      <Space>
+        <Button onClick={checkDuplicates} loading={checking}>
+          检查重复
+        </Button>
+        <Button type="primary" danger onClick={runDeduplicate} loading={deduping}>
+          一键去重
+        </Button>
+      </Space>
+      {duplicates != null && (
+        <Paragraph style={{ marginTop: 12 }}>
+          当前检测到重复内容 <Text strong>{duplicates}</Text> 条。
+        </Paragraph>
+      )}
     </Card>
   );
 }
@@ -508,7 +437,7 @@ export default function Admin() {
       <div>
         <div className="hero">
           <h2 className="hero-title">管理后台</h2>
-          <p className="hero-subtitle">登录后可进行平台授权、模板管理与内容导入。</p>
+          <p className="hero-subtitle">登录后可进行平台授权、内容导入与数据优化。</p>
         </div>
         <Card style={{ maxWidth: 360 }} className="admin-card">
           <Form layout="vertical" onFinish={login}>
@@ -555,10 +484,6 @@ export default function Admin() {
             <span className="stat-label">已回复内容</span>
             <strong className="stat-value">{stats.repliedCount}</strong>
           </div>
-          <div className="stat-card">
-            <span className="stat-label">回复模板</span>
-            <strong className="stat-value">{stats.templateCount}</strong>
-          </div>
         </div>
       )}
       <Divider />
@@ -571,14 +496,14 @@ export default function Admin() {
             children: <AdminOauthContent />,
           },
           {
-            key: 'templates',
-            label: '回复模板',
-            children: <TemplatesPanel />,
-          },
-          {
             key: 'import',
             label: '内容导入',
             children: <ImportPanel />,
+          },
+          {
+            key: 'quality',
+            label: '数据质量',
+            children: <DataQualityPanel />,
           },
         ]}
       />

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Card, Select, Input, Space, Typography, Spin, Empty, Tag, Row, Col, Pagination } from 'antd';
+import { Card, Select, Input, Space, Typography, Spin, Empty, Tag, Row, Col, Pagination, DatePicker, Alert } from 'antd';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { API_BASE } from '../api/base';
@@ -36,6 +36,8 @@ export default function ContentList() {
   const contentType = searchParams.get('contentType') || undefined;
   const keyword = searchParams.get('keyword') || '';
   const replied = searchParams.get('replied') || undefined;
+  const publishedFrom = searchParams.get('publishedFrom') || undefined;
+  const publishedTo = searchParams.get('publishedTo') || undefined;
   const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
 
   const [platforms, setPlatforms] = useState<Platform[]>([]);
@@ -43,9 +45,28 @@ export default function ContentList() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [keywordInput, setKeywordInput] = useState(keyword);
+  const [range, setRange] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null] | null>(() => {
+    if (publishedFrom && publishedTo) {
+      const start = dayjs(publishedFrom);
+      const end = dayjs(publishedTo);
+      if (start.isValid() && end.isValid()) return [start, end];
+    }
+    return null;
+  });
   useEffect(() => {
     setKeywordInput(keyword);
   }, [keyword]);
+  useEffect(() => {
+    if (publishedFrom && publishedTo) {
+      const start = dayjs(publishedFrom);
+      const end = dayjs(publishedTo);
+      if (start.isValid() && end.isValid()) {
+        setRange([start, end]);
+        return;
+      }
+    }
+    setRange(null);
+  }, [publishedFrom, publishedTo]);
 
   const updateParams = useCallback((updates: Record<string, string | undefined>) => {
     setSearchParams((prev) => {
@@ -78,6 +99,8 @@ export default function ContentList() {
     if (platformId) params.set('platformId', platformId);
     if (contentType) params.set('contentType', contentType);
     if (replied) params.set('replied', replied);
+    if (publishedFrom) params.set('publishedFrom', publishedFrom);
+    if (publishedTo) params.set('publishedTo', publishedTo);
     if (keyword) params.set('keyword', keyword);
     params.set('page', String(page));
     params.set('pageSize', String(PAGE_SIZE));
@@ -94,7 +117,7 @@ export default function ContentList() {
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [platformId, contentType, keyword, page]);
+  }, [platformId, contentType, replied, publishedFrom, publishedTo, keyword, page]);
 
   const search = () => {
     updateParams({ keyword: keywordInput.trim(), page: '1' });
@@ -164,6 +187,20 @@ export default function ContentList() {
             { label: '待回复', value: 'false' },
           ]}
         />
+        <DatePicker.RangePicker
+          value={range as [dayjs.Dayjs, dayjs.Dayjs] | null}
+          onChange={(values) => {
+            if (!values || values.length !== 2 || !values[0] || !values[1]) {
+              updateParams({ publishedFrom: undefined, publishedTo: undefined, page: '1' });
+              return;
+            }
+            const start = values[0].startOf('day').toISOString();
+            const end = values[1].endOf('day').toISOString();
+            updateParams({ publishedFrom: start, publishedTo: end, page: '1' });
+          }}
+          allowClear
+          placeholder={['开始日期', '结束日期']}
+        />
         <Input.Search
           placeholder="关键词"
           style={{ width: 200 }}
@@ -174,6 +211,12 @@ export default function ContentList() {
         />
         </Space>
       </div>
+      <Alert
+        type="info"
+        showIcon
+        message="内容来自各平台公开信息，详情以原平台链接为准。如发现重复，可在管理后台进行数据去重。"
+        style={{ marginBottom: 16 }}
+      />
       {loading ? (
         <div style={{ textAlign: 'center', padding: 48 }}>
           <Spin size="large" />
