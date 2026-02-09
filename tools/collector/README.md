@@ -15,6 +15,25 @@ npm install
 npx playwright install chromium
 ```
 
+如果下载超时，可提高超时（毫秒）：
+
+```bash
+PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=120000 npx playwright install chromium
+```
+
+如果网络无法访问官方 CDN，可设置下载镜像：
+
+```bash
+PLAYWRIGHT_DOWNLOAD_HOST=https://playwright.azureedge.net npx playwright install chromium
+```
+
+如果你机器已有 Chrome，可跳过 Playwright 浏览器下载：
+
+```bash
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install
+USE_SYSTEM_CHROME=1 node index.mjs --platforms bilibili,zhihu --keywords "SCI,论文" --perKeyword 10 --out ./output.json
+```
+
 ## 2. 运行采集
 
 ```bash
@@ -42,3 +61,9 @@ node index.mjs \
 
 - B站评论会自动生成可定位链接。
 - 知乎搜索页可能触发反爬，建议降低 `perKeyword` 或使用 `--headful true` 观察运行。
+- 若 B 站 API 返回 412，可传入登录 Cookie：
+
+```bash
+BILIBILI_COOKIE="SESSDATA=xxx; buvid3=xxx" USE_SYSTEM_CHROME=1 node index.mjs \
+  --platforms bilibili --keywords "SCI" --perKeyword 10 --out ./output.json
+```

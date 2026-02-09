@@ -52,26 +52,31 @@ function uniquePush(items, seen, key, data) {
   items.push(data);
 }
 
-async function fetchJson(url) {
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      Referer: 'https://www.bilibili.com/',
-    },
-  });
+async function fetchJson(url, options = {}) {
+  const headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    Referer: 'https://www.bilibili.com/',
+    ...(options.headers || {}),
+  };
+  if (options.request) {
+    const res = await options.request.get(url, { headers });
+    if (!res.ok()) throw new Error(`Request failed: ${res.status()}`);
+    return res.json();
+  }
+  const res = await fetch(url, { headers });
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
   return res.json();
 }
 
-async function collectBilibili(keyword, perKeyword, commentsPerPost, items, seen) {
+async function collectBilibili(keyword, perKeyword, commentsPerPost, items, seen, biliClient) {
   let page = 1;
   let collected = 0;
   while (collected < perKeyword) {
     const url = `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(
       keyword
     )}&page=${page}&page_size=20`;
-    const data = await fetchJson(url);
+    const data = await fetchJson(url, biliClient ? { request: biliClient.request, headers: biliClient.headers } : {});
     const result = data?.data?.result || [];
     if (!Array.isArray(result) || result.length === 0) break;
     for (const r of result) {
@@ -105,7 +110,10 @@ async function collectBilibili(keyword, perKeyword, commentsPerPost, items, seen
       if (commentsPerPost > 0 && aid) {
         const replyUrl = `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&pn=1&ps=${commentsPerPost}`;
         try {
-          const replyData = await fetchJson(replyUrl);
+          const replyData = await fetchJson(
+            replyUrl,
+            biliClient ? { request: biliClient.request, headers: biliClient.headers } : {}
+          );
           const replies = replyData?.data?.replies || [];
           if (Array.isArray(replies)) {
             for (const reply of replies) {
@@ -203,12 +211,28 @@ async function main() {
   const seen = new Set();
   const useZhihu = platforms.includes('zhihu');
   const useBilibili = platforms.includes('bilibili');
-  const browser = useZhihu ? await chromium.launch({ headless: !headful }) : null;
+  const launchOptions = { headless: !headful };
+  if (process.env.USE_SYSTEM_CHROME === '1') {
+    launchOptions.channel = 'chrome';
+  }
+  const browser = useZhihu || useBilibili ? await chromium.launch(launchOptions) : null;
+  let biliClient = null;
 
   try {
+    if (useBilibili && browser) {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await page.goto('https://www.bilibili.com', { waitUntil: 'domcontentloaded' });
+      const cookieHeader = process.env.BILIBILI_COOKIE || '';
+      biliClient = {
+        request: context.request,
+        headers: cookieHeader ? { Cookie: cookieHeader } : {},
+      };
+      await page.close();
+    }
     for (const keyword of keywords) {
       if (useBilibili) {
-        await collectBilibili(keyword, perKeyword, commentsPerPost, items, seen);
+        await collectBilibili(keyword, perKeyword, commentsPerPost, items, seen, biliClient);
       }
       if (useZhihu && browser) {
         await collectZhihu(keyword, perKeyword, items, seen, browser);
