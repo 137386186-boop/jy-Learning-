@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
-import { Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Link, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { Layout, Menu } from 'antd';
 import { getHealthUrl } from './api/base';
 
@@ -67,6 +67,7 @@ export default function App() {
         >
           <Routes>
             <Route path="/" element={<ContentList />} />
+            <Route path="/index.html" element={<Navigate to="/" replace />} />
             <Route path="/content/:id" element={<ContentDetail />} />
             <Route path="/admin" element={<Admin />} />
             <Route path="/admin/oauth" element={<AdminOauth />} />

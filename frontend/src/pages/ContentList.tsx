@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Card, Select, Input, Space, Typography, Spin, Empty, Tag, Row, Col, Pagination, DatePicker, Alert } from 'antd';
+import { Card, Select, Input, Space, Typography, Spin, Empty, Tag, Row, Col, Pagination, DatePicker, Alert, Button, message } from 'antd';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { API_BASE } from '../api/base';
@@ -16,6 +16,7 @@ interface Platform {
 interface ContentItem {
   id: string;
   contentType: string;
+  platformContentId?: string | null;
   authorName: string;
   body: string;
   summary: string | null;
@@ -126,6 +127,11 @@ export default function ContentList() {
   const totalLabel = total ? total.toLocaleString('zh-CN') : '0';
   const platformCount = platforms.length;
   const repliedLabel = replied === 'true' ? '已回复' : replied === 'false' ? '待回复' : '全部';
+  const copyLink = (url: string) => {
+    if (!url) return;
+    navigator.clipboard.writeText(url);
+    message.success('已复制链接');
+  };
 
   return (
     <div>
@@ -225,60 +231,79 @@ export default function ContentList() {
         <Empty description="暂无内容" />
       ) : (
         <Row gutter={[16, 16]} className="content-grid">
-          {list.map((item) => (
-            <Col xs={24} sm={24} md={12} lg={8} key={item.id}>
-              <Card
-                size="small"
-                title={
-                  <Space>
-                    <Tag className="pill-tag">{item.platform?.name ?? '-'}</Tag>
-                    <Tag className="pill-tag" color={item.contentType === 'comment' ? 'blue' : 'default'}>
-                      {item.contentType === 'comment' ? '评论' : '帖子'}
-                    </Tag>
-                  </Space>
-                }
-                extra={
-                  <Link to={`/content/${item.id}`}>详情</Link>
-                }
-              >
-                <div style={{ marginBottom: 8 }}>
-                  <Typography.Text type="secondary">{item.authorName}</Typography.Text>
-                  <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
-                    {dayjs(item.publishedAt).format('YYYY-MM-DD HH:mm')}
-                  </Typography.Text>
-                </div>
-                <Typography.Paragraph ellipsis={{ rows: 3 }} style={{ marginBottom: 8 }}>
-                  {item.summary || item.body}
-                </Typography.Paragraph>
-                {item.keywordTags?.length > 0 && (
-                  <Space wrap size="small">
-                    {item.keywordTags.slice(0, 5).map((t) => (
-                      <Tag key={t}>{t}</Tag>
-                    ))}
-                  </Space>
-                )}
-                <div style={{ marginTop: 8 }}>
-                  {item.likeCount != null && (
-                    <Typography.Text type="secondary">赞 {item.likeCount}</Typography.Text>
-                  )}
-                  {item.commentCount != null && (
-                    <Typography.Text type="secondary" style={{ marginLeft: 12 }}>
-                      评 {item.commentCount}
+          {list.map((item) => {
+            const isComment = item.contentType === 'comment';
+            const hasPreciseLink =
+              !isComment ||
+              (item.platformContentId && item.sourceUrl?.includes(item.platformContentId));
+            return (
+              <Col xs={24} sm={24} md={12} lg={8} key={item.id}>
+                <Card
+                  size="small"
+                  title={
+                    <Space>
+                      <Tag className="pill-tag">{item.platform?.name ?? '-'}</Tag>
+                      <Tag className="pill-tag" color={item.contentType === 'comment' ? 'blue' : 'default'}>
+                        {item.contentType === 'comment' ? '评论' : '帖子'}
+                      </Tag>
+                      {!hasPreciseLink && (
+                        <Tag color="orange">链接待补全</Tag>
+                      )}
+                    </Space>
+                  }
+                  extra={
+                    <Link to={`/content/${item.id}`}>详情</Link>
+                  }
+                >
+                  <div style={{ marginBottom: 8 }}>
+                    <Typography.Text type="secondary">{item.authorName}</Typography.Text>
+                    <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
+                      {dayjs(item.publishedAt).format('YYYY-MM-DD HH:mm')}
                     </Typography.Text>
+                  </div>
+                  <Typography.Paragraph ellipsis={{ rows: 3 }} style={{ marginBottom: 8 }}>
+                    {item.summary || item.body}
+                  </Typography.Paragraph>
+                  {item.keywordTags?.length > 0 && (
+                    <Space wrap size="small">
+                      {item.keywordTags.slice(0, 5).map((t) => (
+                        <Tag key={t}>{t}</Tag>
+                      ))}
+                    </Space>
                   )}
-                  {item.replied ? (
-                    <Tag color="green" style={{ marginLeft: 8 }}>
-                      已回复
-                    </Tag>
-                  ) : (
-                    <Tag color="orange" style={{ marginLeft: 8 }}>
-                      待回复
-                    </Tag>
-                  )}
-                </div>
-              </Card>
-            </Col>
-          ))}
+                  <div style={{ marginTop: 8 }}>
+                    {item.likeCount != null && (
+                      <Typography.Text type="secondary">赞 {item.likeCount}</Typography.Text>
+                    )}
+                    {item.commentCount != null && (
+                      <Typography.Text type="secondary" style={{ marginLeft: 12 }}>
+                        评 {item.commentCount}
+                      </Typography.Text>
+                    )}
+                    {item.replied ? (
+                      <Tag color="green" style={{ marginLeft: 8 }}>
+                        已回复
+                      </Tag>
+                    ) : (
+                      <Tag color="orange" style={{ marginLeft: 8 }}>
+                        待回复
+                      </Tag>
+                    )}
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <Space size="small">
+                      <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer">
+                        原文
+                      </a>
+                      <Button size="small" onClick={() => copyLink(item.sourceUrl)}>
+                        复制链接
+                      </Button>
+                    </Space>
+                  </div>
+                </Card>
+              </Col>
+            );
+          })}
         </Row>
       )}
       {total > 0 && (
