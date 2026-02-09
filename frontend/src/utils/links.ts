@@ -20,6 +20,40 @@ function safeAppendHash(url: URL, hash: string): string {
 export function resolveSourceLink(input: SourceLinkInput): ResolvedLink | null {
   const { sourceUrl, platformSlug, contentType, platformContentId } = input;
   if (!sourceUrl) return null;
+  try {
+    const url = new URL(sourceUrl);
+    if (platformSlug === 'bilibili') {
+      if (contentType === 'comment') {
+        const hasRoot = url.searchParams.has('comment_root_id');
+        const hasReply = url.hash?.includes('reply');
+        if (hasRoot || hasReply) {
+          return { url: sourceUrl, auto: false };
+        }
+        if (!platformContentId) {
+          return { url: sourceUrl, auto: false, reason: '缺少 platformContentId' };
+        }
+        url.searchParams.set('comment_on', '1');
+        url.searchParams.set('comment_root_id', platformContentId);
+        return {
+          url: safeAppendHash(url, `reply${platformContentId}`),
+          auto: true,
+          reason: '自动定位（B站评论）',
+        };
+      }
+      // post: remove tracking params for cleaner share
+      const cleaned = new URL(sourceUrl);
+      ['spm_id_from', 'share_tag', 'share_source', 'share_medium'].forEach((k) =>
+        cleaned.searchParams.delete(k)
+      );
+      return {
+        url: cleaned.toString(),
+        auto: cleaned.toString() !== sourceUrl,
+        reason: cleaned.toString() !== sourceUrl ? '已清理跟踪参数' : undefined,
+      };
+    }
+  } catch {
+    // fallthrough to generic handling
+  }
   if (contentType !== 'comment') {
     return { url: sourceUrl, auto: false };
   }
