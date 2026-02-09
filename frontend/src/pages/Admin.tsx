@@ -306,6 +306,7 @@ function DataQualityPanel() {
     duplicates: number;
     commentMissingId: number;
     commentLinkUnmatched: number;
+    bilibiliSearchLinks: number;
   } | null>(null);
 
   const refreshQuality = async () => {
@@ -367,6 +368,25 @@ function DataQualityPanel() {
     }
   };
 
+  const cleanupBilibiliSearch = async () => {
+    if (!window.confirm('将删除B站搜索页链接的内容，是否继续？')) return;
+    setRepairing(true);
+    try {
+      const res = await adminFetch(`${API_BASE}/admin/contents/cleanup-bilibili-search`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || '清理失败');
+        return;
+      }
+      message.success(`已清理 ${data.deleted ?? 0} 条`);
+      refreshQuality();
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   useEffect(() => {
     refreshQuality();
   }, []);
@@ -383,6 +403,9 @@ function DataQualityPanel() {
         </Button>
         <Button onClick={repairCommentIds} loading={repairing}>
           修复评论ID
+        </Button>
+        <Button onClick={cleanupBilibiliSearch} loading={repairing} danger>
+          清理B站搜索链接
         </Button>
         <Button type="primary" danger onClick={runDeduplicate} loading={deduping}>
           一键去重
@@ -405,6 +428,10 @@ function DataQualityPanel() {
           <div className="stat-card">
             <span className="stat-label">评论链接未定位</span>
             <strong className="stat-value">{quality.commentLinkUnmatched}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">B站搜索链接</span>
+            <strong className="stat-value">{quality.bilibiliSearchLinks}</strong>
           </div>
         </div>
       )}

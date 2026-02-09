@@ -260,6 +260,14 @@ export default function ContentDetail() {
               </Button>
             )}
           </div>
+          {resolved?.reason && !resolved.auto && (
+            <Alert
+              type="warning"
+              message={resolved.reason}
+              showIcon
+              style={{ marginTop: 12 }}
+            />
+          )}
           {isComment && !hasCommentAnchor && (
             <Alert
               type="warning"

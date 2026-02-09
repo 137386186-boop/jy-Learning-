@@ -24,7 +24,13 @@ export function resolveSourceLink(input: SourceLinkInput): ResolvedLink | null {
   try {
     const url = new URL(sourceUrl);
     if (platformSlug === 'bilibili') {
+      const host = url.hostname.toLowerCase();
+      const isSearch = host === 'search.bilibili.com';
+      const isVideo = host.endsWith('bilibili.com') && url.pathname.startsWith('/video/');
       if (contentType === 'comment') {
+        if (!isVideo) {
+          return { url: sourceUrl, auto: false, reason: 'B站评论需视频页链接' };
+        }
         const hasRoot = url.searchParams.has('comment_root_id');
         const hasReply = url.hash?.includes('reply');
         if (hasRoot || hasReply) {
@@ -41,7 +47,18 @@ export function resolveSourceLink(input: SourceLinkInput): ResolvedLink | null {
           reason: '自动定位（B站评论）',
         };
       }
-      // post: remove tracking params for cleaner share
+      // post
+      if (isSearch) {
+        if (platformContentId && /^BV[0-9A-Za-z]+$/.test(platformContentId)) {
+          return {
+            url: `https://www.bilibili.com/video/${platformContentId}`,
+            auto: true,
+            reason: '自动修复为视频页链接',
+          };
+        }
+        return { url: sourceUrl, auto: false, reason: '搜索链接无法定位' };
+      }
+      // remove tracking params for cleaner share
       const cleaned = new URL(sourceUrl);
       ['spm_id_from', 'share_tag', 'share_source', 'share_medium'].forEach((k) =>
         cleaned.searchParams.delete(k)

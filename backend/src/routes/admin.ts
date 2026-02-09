@@ -44,6 +44,27 @@ function toDate(input: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function isBilibiliVideoUrl(sourceUrl: string): boolean {
+  try {
+    const url = new URL(sourceUrl);
+    const host = url.hostname.toLowerCase();
+    if (host.startsWith('search.')) return false;
+    if (!host.endsWith('bilibili.com')) return false;
+    return url.pathname.startsWith('/video/');
+  } catch {
+    return false;
+  }
+}
+
+function isBilibiliSearchUrl(sourceUrl: string): boolean {
+  try {
+    const url = new URL(sourceUrl);
+    return url.hostname.toLowerCase() === 'search.bilibili.com';
+  } catch {
+    return false;
+  }
+}
+
 function isNumericId(input: string | null | undefined): boolean {
   if (!input) return false;
   return /^[0-9]+$/.test(input);
@@ -223,6 +244,7 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
         duplicates: bigint;
         commentMissingId: bigint;
         commentLinkUnmatched: bigint;
+        bilibiliSearchLinks: bigint;
       }[]
     >`
       WITH ranked AS (
@@ -245,19 +267,26 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
             AND platform_content_id IS NOT NULL
             AND platform_content_id <> ''
             AND source_url NOT LIKE '%' || platform_content_id || '%'
-        )::bigint AS commentLinkUnmatched
+        )::bigint AS commentLinkUnmatched,
+        (SELECT COUNT(*) FROM "Content" c
+          JOIN "Platform" p ON p.id = c.platform_id
+          WHERE p.slug = 'bilibili'
+            AND c.source_url LIKE '%search.bilibili.com/%'
+        )::bigint AS bilibiliSearchLinks
     `;
     const data = row ?? {
       total: BigInt(0),
       duplicates: BigInt(0),
       commentMissingId: BigInt(0),
       commentLinkUnmatched: BigInt(0),
+      bilibiliSearchLinks: BigInt(0),
     };
     res.json({
       total: Number(data.total ?? 0),
       duplicates: Number(data.duplicates ?? 0),
       commentMissingId: Number(data.commentMissingId ?? 0),
       commentLinkUnmatched: Number(data.commentLinkUnmatched ?? 0),
+      bilibiliSearchLinks: Number(data.bilibiliSearchLinks ?? 0),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -341,6 +370,10 @@ router.post('/contents/import', requireAdmin, importLimiter, async (req: Request
       }
       if (!isValidSourceUrl(sourceUrl)) {
         errors.push({ index, reason: 'sourceUrl must be a direct link to a specific post/comment' });
+        return;
+      }
+      if (platformSlug === 'bilibili' && !isBilibiliVideoUrl(sourceUrl)) {
+        errors.push({ index, reason: 'bilibili sourceUrl must be a video page, not search results' });
         return;
       }
       const contentType = it.contentType === 'comment' ? 'comment' : 'post';
@@ -524,6 +557,21 @@ router.post('/contents/repair-comment-ids', requireAdmin, async (req: Request, r
       updated += 1;
     }
     res.json({ ok: true, checked: candidates.length, updated });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+/** POST /api/admin/contents/cleanup-bilibili-search — 清理B站搜索链接 */
+router.post('/contents/cleanup-bilibili-search', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const deleted = await prisma.$executeRaw`
+      DELETE FROM "Content"
+      WHERE platform_id IN (SELECT id FROM "Platform" WHERE slug = 'bilibili')
+        AND source_url LIKE '%search.bilibili.com/%'
+    `;
+    res.json({ ok: true, deleted: Number(deleted) });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });

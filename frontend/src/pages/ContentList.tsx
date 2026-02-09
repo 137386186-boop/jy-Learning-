@@ -298,24 +298,29 @@ export default function ContentList() {
                       </Tag>
                     )}
                   </div>
-                  <div style={{ marginTop: 12 }}>
-                    <Space size="small">
-                      <a href={resolved?.url || item.sourceUrl} target="_blank" rel="noopener noreferrer">
-                        {linkLabel}
-                      </a>
-                      <Button size="small" onClick={() => copyLink(resolved?.url || item.sourceUrl)}>
-                        复制链接
-                      </Button>
-                    </Space>
-                    {resolved?.auto && (
-                      <Tag color="blue" style={{ marginLeft: 8 }}>
-                        自动定位
-                      </Tag>
-                    )}
-                  </div>
-                </Card>
-              </Col>
-            );
+                <div style={{ marginTop: 12 }}>
+                  <Space size="small">
+                    <a href={resolved?.url || item.sourceUrl} target="_blank" rel="noopener noreferrer">
+                      {linkLabel}
+                    </a>
+                    <Button size="small" onClick={() => copyLink(resolved?.url || item.sourceUrl)}>
+                      复制链接
+                    </Button>
+                  </Space>
+                  {resolved?.auto && (
+                    <Tag color="blue" style={{ marginLeft: 8 }}>
+                      自动定位
+                    </Tag>
+                  )}
+                  {resolved?.reason && !resolved.auto && (
+                    <Tag color="red" style={{ marginLeft: 8 }}>
+                      {resolved.reason}
+                    </Tag>
+                  )}
+                </div>
+              </Card>
+            </Col>
+          );
           })}
         </Row>
       )}
