@@ -4,6 +4,7 @@ import { Card, Button, Input, Typography, Spin, message, App, Alert } from 'antd
 import dayjs from 'dayjs';
 import { adminFetch, getAdminToken } from '../api/admin';
 import { API_BASE } from '../api/base';
+import { resolveSourceLink } from '../utils/links';
 
 const API = `${API_BASE}/contents`;
 const REPLY_API = `${API_BASE}/reply`;
@@ -148,7 +149,14 @@ export default function ContentDetail() {
 
   const isComment = detail.contentType === 'comment';
   const commentId = detail.platformContentId || '';
+  const resolved = resolveSourceLink({
+    sourceUrl: detail.sourceUrl,
+    platformSlug: detail.platform?.slug,
+    contentType: detail.contentType,
+    platformContentId: detail.platformContentId,
+  });
   const hasCommentAnchor = isComment && commentId && detail.sourceUrl?.includes(commentId);
+  const linkToUse = resolved?.url || detail.sourceUrl;
 
   return (
     <App>
@@ -207,12 +215,24 @@ export default function ContentDetail() {
             )}
           </div>
           <div style={{ marginTop: 16 }}>
-            <a href={detail.sourceUrl} target="_blank" rel="noopener noreferrer">
-              跳转原平台
+            <a href={linkToUse} target="_blank" rel="noopener noreferrer">
+              {resolved?.auto ? '跳转定位链接' : '跳转原平台'}
             </a>
             <Typography.Text type="secondary" style={{ marginLeft: 12 }}>
               {detail.sourceUrl}
             </Typography.Text>
+            {resolved?.auto && (
+              <Button
+                size="small"
+                style={{ marginLeft: 12 }}
+                onClick={() => {
+                  navigator.clipboard.writeText(linkToUse);
+                  message.success('已复制定位链接');
+                }}
+              >
+                复制定位链接
+              </Button>
+            )}
           </div>
           {isComment && !hasCommentAnchor && (
             <Alert

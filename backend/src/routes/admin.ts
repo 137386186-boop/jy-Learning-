@@ -193,6 +193,57 @@ router.delete('/reply-templates/:id', requireAdmin, async (req: Request, res: Re
   }
 });
 
+/** GET /api/admin/contents/quality — 数据质量报告 */
+router.get('/contents/quality', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const [row] = await prisma.$queryRaw<
+      {
+        total: bigint;
+        duplicates: bigint;
+        commentMissingId: bigint;
+        commentLinkUnmatched: bigint;
+      }[]
+    >`
+      WITH ranked AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY platform_id, COALESCE(platform_content_id, source_url)
+                 ORDER BY published_at DESC, created_at DESC
+               ) AS rn
+        FROM "Content"
+      )
+      SELECT
+        (SELECT COUNT(*) FROM "Content")::bigint AS total,
+        (SELECT COUNT(*) FROM ranked WHERE rn > 1)::bigint AS duplicates,
+        (SELECT COUNT(*) FROM "Content"
+          WHERE content_type = 'comment'
+            AND (platform_content_id IS NULL OR platform_content_id = '')
+        )::bigint AS commentMissingId,
+        (SELECT COUNT(*) FROM "Content"
+          WHERE content_type = 'comment'
+            AND platform_content_id IS NOT NULL
+            AND platform_content_id <> ''
+            AND source_url NOT LIKE '%' || platform_content_id || '%'
+        )::bigint AS commentLinkUnmatched
+    `;
+    const data = row ?? {
+      total: BigInt(0),
+      duplicates: BigInt(0),
+      commentMissingId: BigInt(0),
+      commentLinkUnmatched: BigInt(0),
+    };
+    res.json({
+      total: Number(data.total ?? 0),
+      duplicates: Number(data.duplicates ?? 0),
+      commentMissingId: Number(data.commentMissingId ?? 0),
+      commentLinkUnmatched: Number(data.commentLinkUnmatched ?? 0),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
 /** POST /api/admin/contents/import — 批量导入内容 */
 router.post('/contents/import', requireAdmin, importLimiter, async (req: Request, res: Response) => {
   try {

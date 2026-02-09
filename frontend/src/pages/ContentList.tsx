@@ -4,6 +4,7 @@ import { Card, Select, Input, Space, Typography, Spin, Empty, Tag, Row, Col, Pag
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { API_BASE } from '../api/base';
+import { resolveSourceLink } from '../utils/links';
 
 const API = `${API_BASE}/contents`;
 
@@ -233,9 +234,16 @@ export default function ContentList() {
         <Row gutter={[16, 16]} className="content-grid">
           {list.map((item) => {
             const isComment = item.contentType === 'comment';
+            const resolved = resolveSourceLink({
+              sourceUrl: item.sourceUrl,
+              platformSlug: item.platform?.slug,
+              contentType: item.contentType,
+              platformContentId: item.platformContentId,
+            });
             const hasPreciseLink =
               !isComment ||
               (item.platformContentId && item.sourceUrl?.includes(item.platformContentId));
+            const linkLabel = resolved?.auto ? '定位链接' : '原文';
             return (
               <Col xs={24} sm={24} md={12} lg={8} key={item.id}>
                 <Card
@@ -292,13 +300,18 @@ export default function ContentList() {
                   </div>
                   <div style={{ marginTop: 12 }}>
                     <Space size="small">
-                      <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer">
-                        原文
+                      <a href={resolved?.url || item.sourceUrl} target="_blank" rel="noopener noreferrer">
+                        {linkLabel}
                       </a>
-                      <Button size="small" onClick={() => copyLink(item.sourceUrl)}>
+                      <Button size="small" onClick={() => copyLink(resolved?.url || item.sourceUrl)}>
                         复制链接
                       </Button>
                     </Space>
+                    {resolved?.auto && (
+                      <Tag color="blue" style={{ marginLeft: 8 }}>
+                        自动定位
+                      </Tag>
+                    )}
                   </div>
                 </Card>
               </Col>

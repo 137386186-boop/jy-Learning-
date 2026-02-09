@@ -300,22 +300,25 @@ function DataQualityPanel() {
   const [checking, setChecking] = useState(false);
   const [deduping, setDeduping] = useState(false);
   const [duplicates, setDuplicates] = useState<number | null>(null);
+  const [quality, setQuality] = useState<{
+    total: number;
+    duplicates: number;
+    commentMissingId: number;
+    commentLinkUnmatched: number;
+  } | null>(null);
 
-  const checkDuplicates = async () => {
+  const refreshQuality = async () => {
     setChecking(true);
     try {
-      const res = await adminFetch(`${API_BASE}/admin/contents/deduplicate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dryRun: true }),
-      });
+      const res = await adminFetch(`${API_BASE}/admin/contents/quality`);
       const data = await res.json();
       if (!res.ok) {
         message.error(data.error || '检查失败');
         return;
       }
+      setQuality(data);
       setDuplicates(data.duplicates ?? 0);
-      message.success('已完成检查');
+      message.success('报告已更新');
     } finally {
       setChecking(false);
     }
@@ -337,10 +340,15 @@ function DataQualityPanel() {
       }
       setDuplicates(data.duplicates ?? 0);
       message.success(`去重完成，删除 ${data.deleted ?? 0} 条`);
+      refreshQuality();
     } finally {
       setDeduping(false);
     }
   };
+
+  useEffect(() => {
+    refreshQuality();
+  }, []);
 
   return (
     <Card title="数据质量" className="admin-card">
@@ -348,14 +356,34 @@ function DataQualityPanel() {
         系统将按平台 + 平台内容 ID 或来源链接去重，确保列表中不出现重复内容。
       </Paragraph>
       <Space>
-        <Button onClick={checkDuplicates} loading={checking}>
-          检查重复
+        <Button onClick={refreshQuality} loading={checking}>
+          刷新报告
         </Button>
         <Button type="primary" danger onClick={runDeduplicate} loading={deduping}>
           一键去重
         </Button>
       </Space>
-      {duplicates != null && (
+      {quality && (
+        <div className="stat-strip" style={{ marginTop: 16 }}>
+          <div className="stat-card">
+            <span className="stat-label">总内容</span>
+            <strong className="stat-value">{quality.total}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">重复内容</span>
+            <strong className="stat-value">{quality.duplicates}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">评论缺少ID</span>
+            <strong className="stat-value">{quality.commentMissingId}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">评论链接未定位</span>
+            <strong className="stat-value">{quality.commentLinkUnmatched}</strong>
+          </div>
+        </div>
+      )}
+      {!quality && duplicates != null && (
         <Paragraph style={{ marginTop: 12 }}>
           当前检测到重复内容 <Text strong>{duplicates}</Text> 条。
         </Paragraph>
