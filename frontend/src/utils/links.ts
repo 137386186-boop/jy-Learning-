@@ -20,6 +20,7 @@ function safeAppendHash(url: URL, hash: string): string {
 export function resolveSourceLink(input: SourceLinkInput): ResolvedLink | null {
   const { sourceUrl, platformSlug, contentType, platformContentId } = input;
   if (!sourceUrl) return null;
+  const isNumericId = (value?: string | null) => !!value && /^[0-9]+$/.test(value);
   try {
     const url = new URL(sourceUrl);
     if (platformSlug === 'bilibili') {
@@ -29,8 +30,8 @@ export function resolveSourceLink(input: SourceLinkInput): ResolvedLink | null {
         if (hasRoot || hasReply) {
           return { url: sourceUrl, auto: false };
         }
-        if (!platformContentId) {
-          return { url: sourceUrl, auto: false, reason: '缺少 platformContentId' };
+        if (!platformContentId || !isNumericId(platformContentId)) {
+          return { url: sourceUrl, auto: false, reason: '缺少或无效的 platformContentId' };
         }
         url.searchParams.set('comment_on', '1');
         url.searchParams.set('comment_root_id', platformContentId);

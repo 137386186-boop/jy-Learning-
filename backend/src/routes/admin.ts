@@ -44,6 +44,27 @@ function toDate(input: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function isNumericId(input: string | null | undefined): boolean {
+  if (!input) return false;
+  return /^[0-9]+$/.test(input);
+}
+
+function extractCommentIdFromUrl(sourceUrl: string): string | null {
+  try {
+    const url = new URL(sourceUrl);
+    const rootId = url.searchParams.get('comment_root_id');
+    if (rootId && isNumericId(rootId)) return rootId;
+    const hash = url.hash || '';
+    let match = hash.match(/reply(\d+)/);
+    if (match && isNumericId(match[1])) return match[1];
+    match = hash.match(/comment-(\d+)/);
+    if (match && isNumericId(match[1])) return match[1];
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function isValidSourceUrl(input: string): boolean {
   try {
     const url = new URL(input);
@@ -304,6 +325,7 @@ router.post('/contents/import', requireAdmin, importLimiter, async (req: Request
         return;
       }
       const it = raw as any;
+      const platformSlug = it.platformSlug ? String(it.platformSlug).trim() : null;
       const platformId = it.platformId || (it.platformSlug ? platformMap.get(String(it.platformSlug)) : null);
       if (!platformId) {
         errors.push({ index, reason: 'platformId or platformSlug required' });
@@ -322,9 +344,17 @@ router.post('/contents/import', requireAdmin, importLimiter, async (req: Request
         return;
       }
       const contentType = it.contentType === 'comment' ? 'comment' : 'post';
-      const platformContentId = it.platformContentId ? String(it.platformContentId) : null;
+      let platformContentId = it.platformContentId ? String(it.platformContentId) : null;
+      if (contentType === 'comment' && !platformContentId) {
+        const extracted = extractCommentIdFromUrl(sourceUrl);
+        if (extracted) platformContentId = extracted;
+      }
       if (contentType === 'comment' && platformContentId && !sourceUrl.includes(platformContentId)) {
         errors.push({ index, reason: 'comment sourceUrl must include platformContentId for precise定位' });
+        return;
+      }
+      if (platformSlug === 'bilibili' && contentType === 'comment' && !isNumericId(platformContentId)) {
+        errors.push({ index, reason: 'bilibili comment platformContentId must be numeric comment_root_id' });
         return;
       }
       const likeCount =
@@ -464,6 +494,36 @@ router.post('/contents/deduplicate', requireAdmin, async (req: Request, res: Res
       DELETE FROM "Content" WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
     `;
     res.json({ ok: true, duplicates, deleted: Number(deleted) });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+/** POST /api/admin/contents/repair-comment-ids — 从链接修复评论ID */
+router.post('/contents/repair-comment-ids', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const limitRaw = (req.body as { limit?: number })?.limit;
+    const limit = Math.min(2000, Math.max(1, Number(limitRaw) || 500));
+    const candidates = await prisma.content.findMany({
+      where: {
+        contentType: 'comment',
+      },
+      select: { id: true, sourceUrl: true, platformContentId: true },
+      take: limit,
+    });
+    let updated = 0;
+    for (const item of candidates) {
+      if (item.platformContentId && isNumericId(item.platformContentId)) continue;
+      const extracted = extractCommentIdFromUrl(item.sourceUrl);
+      if (!extracted) continue;
+      await prisma.content.update({
+        where: { id: item.id },
+        data: { platformContentId: extracted },
+      });
+      updated += 1;
+    }
+    res.json({ ok: true, checked: candidates.length, updated });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });

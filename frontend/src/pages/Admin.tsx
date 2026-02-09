@@ -299,6 +299,7 @@ function ImportPanel() {
 function DataQualityPanel() {
   const [checking, setChecking] = useState(false);
   const [deduping, setDeduping] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [duplicates, setDuplicates] = useState<number | null>(null);
   const [quality, setQuality] = useState<{
     total: number;
@@ -346,6 +347,26 @@ function DataQualityPanel() {
     }
   };
 
+  const repairCommentIds = async () => {
+    setRepairing(true);
+    try {
+      const res = await adminFetch(`${API_BASE}/admin/contents/repair-comment-ids`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 2000 }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || '修复失败');
+        return;
+      }
+      message.success(`已修复 ${data.updated ?? 0} 条评论 ID`);
+      refreshQuality();
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   useEffect(() => {
     refreshQuality();
   }, []);
@@ -354,10 +375,14 @@ function DataQualityPanel() {
     <Card title="数据质量" className="admin-card">
       <Paragraph type="secondary">
         系统将按平台 + 平台内容 ID 或来源链接去重，确保列表中不出现重复内容。
+        可使用“修复评论ID”从链接中提取 comment_root_id 或 comment-xxx，提升定位准确性。
       </Paragraph>
       <Space>
         <Button onClick={refreshQuality} loading={checking}>
           刷新报告
+        </Button>
+        <Button onClick={repairCommentIds} loading={repairing}>
+          修复评论ID
         </Button>
         <Button type="primary" danger onClick={runDeduplicate} loading={deduping}>
           一键去重
