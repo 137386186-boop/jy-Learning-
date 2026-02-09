@@ -5,6 +5,11 @@ export default defineConfig({
     build: {
         chunkSizeWarningLimit: 700,
         rollupOptions: {
+            input: {
+                main: 'index.html',
+                admin: 'admin/index.html',
+                adminOauth: 'admin/oauth/index.html',
+            },
             output: {
                 manualChunks: {
                     react: ['react', 'react-dom', 'react-router-dom'],

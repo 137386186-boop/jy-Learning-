@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite';
-import { resolve } from 'path';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
@@ -8,9 +7,9 @@ export default defineConfig({
     chunkSizeWarningLimit: 700,
     rollupOptions: {
       input: {
-        main: resolve(__dirname, 'index.html'),
-        admin: resolve(__dirname, 'admin/index.html'),
-        adminOauth: resolve(__dirname, 'admin/oauth/index.html'),
+        main: 'index.html',
+        admin: 'admin/index.html',
+        adminOauth: 'admin/oauth/index.html',
       },
       output: {
         manualChunks: {
