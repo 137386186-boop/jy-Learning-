@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useLocation } from 'react-router-dom';
 import { Card, Button, Input, Typography, Spin, message, App, Alert } from 'antd';
 import dayjs from 'dayjs';
 import { adminFetch, getAdminToken } from '../api/admin';
@@ -27,6 +27,16 @@ interface ContentDetailType {
   platform: { id: string; name: string; slug: string };
 }
 
+type ContentListStateItem = Partial<ContentDetailType> & {
+  id: string;
+  contentType: string;
+  authorName: string;
+  body: string;
+  publishedAt: string;
+  sourceUrl: string;
+  platform: { id: string; name: string; slug: string };
+};
+
 interface PlatformAuthInfo {
   id: string;
   name: string;
@@ -38,15 +48,21 @@ interface PlatformAuthInfo {
 
 export default function ContentDetail() {
   const { id } = useParams<{ id: string }>();
-  const [detail, setDetail] = useState<ContentDetailType | null>(null);
-  const [loading, setLoading] = useState(true);
+  const location = useLocation();
+  const listState = (location.state as { item?: ContentListStateItem } | null)?.item;
+  const [detail, setDetail] = useState<ContentDetailType | null>(
+    listState ? (listState as ContentDetailType) : null
+  );
+  const [loading, setLoading] = useState(!listState);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
   const [replyLoading, setReplyLoading] = useState(false);
   const [platformAuth, setPlatformAuth] = useState<PlatformAuthInfo | null>(null);
 
   useEffect(() => {
     if (!id) return;
-    setLoading(true);
+    setLoadError(null);
+    if (!detail) setLoading(true);
     const controller = new AbortController();
     fetch(`${API}/${id}`, { signal: controller.signal })
       .then((r) => {
@@ -56,7 +72,8 @@ export default function ContentDetail() {
       .then(setDetail)
       .catch((e) => {
         if (e?.name === 'AbortError') return;
-        setDetail(null);
+        if (!detail) setDetail(null);
+        setLoadError(e instanceof Error ? e.message : '加载失败');
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
@@ -176,6 +193,15 @@ export default function ContentDetail() {
             </Button>
           }
         >
+          {loadError && (
+            <Alert
+              type="warning"
+              message="内容加载较慢，已先展示列表预览数据"
+              description="可以稍后刷新重试"
+              showIcon
+              style={{ marginBottom: 12 }}
+            />
+          )}
           <Typography.Paragraph type="secondary">
             {detail.authorName}
             {detail.authorId && ` (${detail.authorId})`} ·{' '}

@@ -260,7 +260,7 @@ export default function ContentList() {
                     </Space>
                   }
                   extra={
-                    <Link to={`/content/${item.id}`}>详情</Link>
+                    <Link to={`/content/${item.id}`} state={{ item }}>详情</Link>
                   }
                 >
                   <div style={{ marginBottom: 8 }}>
