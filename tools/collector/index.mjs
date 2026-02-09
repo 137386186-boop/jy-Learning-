@@ -32,6 +32,7 @@ function parseArgs() {
   const commentsPerPost = Number(map.get('commentsPerPost') || 5);
   const out = map.get('out') || path.resolve(process.cwd(), 'output.json');
   const headful = map.get('headful') === 'true';
+  const skipZhihuOnError = map.get('skipZhihuOnError') !== 'false';
   return {
     keywords: keywords.length ? keywords : DEFAULT_KEYWORDS,
     platforms,
@@ -39,6 +40,7 @@ function parseArgs() {
     commentsPerPost: Number.isFinite(commentsPerPost) ? commentsPerPost : 5,
     out,
     headful,
+    skipZhihuOnError,
   };
 }
 
@@ -206,7 +208,7 @@ async function collectZhihu(keyword, perKeyword, items, seen, browser) {
 }
 
 async function main() {
-  const { keywords, platforms, perKeyword, commentsPerPost, out, headful } = parseArgs();
+  const { keywords, platforms, perKeyword, commentsPerPost, out, headful, skipZhihuOnError } = parseArgs();
   const items = [];
   const seen = new Set();
   const useZhihu = platforms.includes('zhihu');
@@ -235,7 +237,12 @@ async function main() {
         await collectBilibili(keyword, perKeyword, commentsPerPost, items, seen, biliClient);
       }
       if (useZhihu && browser) {
-        await collectZhihu(keyword, perKeyword, items, seen, browser);
+        try {
+          await collectZhihu(keyword, perKeyword, items, seen, browser);
+        } catch (err) {
+          console.warn(`[zhihu] keyword "${keyword}" failed:`, err?.message || err);
+          if (!skipZhihuOnError) throw err;
+        }
       }
     }
   } finally {

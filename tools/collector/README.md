@@ -52,6 +52,7 @@ node index.mjs \
 - `--commentsPerPost`：每个帖子采集的评论数量（B站）
 - `--out`：输出 JSON 文件路径
 - `--headful true`：可视化运行（调试用）
+- `--skipZhihuOnError false`：知乎失败时是否终止（默认跳过继续）
 
 ## 3. 导入到平台
 
