@@ -243,6 +243,14 @@ export default function ContentList() {
             const hasPreciseLink =
               !isComment ||
               (item.platformContentId && item.sourceUrl?.includes(item.platformContentId));
+            const fallbackCommentLink =
+              item.platform?.slug === 'bilibili' &&
+              isComment &&
+              !resolved?.auto &&
+              item.platformContentId &&
+              /^BV[0-9A-Za-z]+$/.test(item.platformContentId)
+                ? `https://www.bilibili.com/video/${item.platformContentId}`
+                : null;
             const linkLabel = resolved?.auto ? '定位链接' : '原文';
             return (
               <Col xs={24} sm={24} md={12} lg={8} key={item.id}>
@@ -306,6 +314,11 @@ export default function ContentList() {
                     <Button size="small" onClick={() => copyLink(resolved?.url || item.sourceUrl)}>
                       复制链接
                     </Button>
+                    {fallbackCommentLink && (
+                      <a href={fallbackCommentLink} target="_blank" rel="noopener noreferrer">
+                        回到视频
+                      </a>
+                    )}
                   </Space>
                   {resolved?.auto && (
                     <Tag color="blue" style={{ marginLeft: 8 }}>
