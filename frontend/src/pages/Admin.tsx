@@ -307,6 +307,7 @@ function DataQualityPanel() {
     commentMissingId: number;
     commentLinkUnmatched: number;
     bilibiliSearchLinks: number;
+    demoContents: number;
   } | null>(null);
 
   const refreshQuality = async () => {
@@ -387,6 +388,25 @@ function DataQualityPanel() {
     }
   };
 
+  const cleanupDemoContents = async () => {
+    if (!window.confirm('将删除示例/测试数据，是否继续？')) return;
+    setRepairing(true);
+    try {
+      const res = await adminFetch(`${API_BASE}/admin/contents/cleanup-demo`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || '清理失败');
+        return;
+      }
+      message.success(`已清理 ${data.deleted ?? 0} 条示例数据`);
+      refreshQuality();
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   useEffect(() => {
     refreshQuality();
   }, []);
@@ -406,6 +426,9 @@ function DataQualityPanel() {
         </Button>
         <Button onClick={cleanupBilibiliSearch} loading={repairing} danger>
           清理B站搜索链接
+        </Button>
+        <Button onClick={cleanupDemoContents} loading={repairing}>
+          清理示例数据
         </Button>
         <Button type="primary" danger onClick={runDeduplicate} loading={deduping}>
           一键去重
@@ -432,6 +455,10 @@ function DataQualityPanel() {
           <div className="stat-card">
             <span className="stat-label">B站搜索链接</span>
             <strong className="stat-value">{quality.bilibiliSearchLinks}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">示例数据</span>
+            <strong className="stat-value">{quality.demoContents}</strong>
           </div>
         </div>
       )}

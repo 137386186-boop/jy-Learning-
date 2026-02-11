@@ -65,6 +65,12 @@ function isBilibiliSearchUrl(sourceUrl: string): boolean {
   }
 }
 
+function isDemoContent(sourceUrl: string, platformContentId?: string | null): boolean {
+  const id = platformContentId || '';
+  if (id.startsWith('demo')) return true;
+  return /\/demo\/|demo-/.test(sourceUrl);
+}
+
 function isNumericId(input: string | null | undefined): boolean {
   if (!input) return false;
   return /^[0-9]+$/.test(input);
@@ -245,6 +251,7 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
         commentMissingId: bigint;
         commentLinkUnmatched: bigint;
         bilibiliSearchLinks: bigint;
+        demoContents: bigint;
       }[]
     >`
       WITH ranked AS (
@@ -272,7 +279,12 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
           JOIN "Platform" p ON p.id = c.platform_id
           WHERE p.slug = 'bilibili'
             AND c.source_url LIKE '%search.bilibili.com/%'
-        )::bigint AS bilibiliSearchLinks
+        )::bigint AS bilibiliSearchLinks,
+        (SELECT COUNT(*) FROM "Content"
+          WHERE source_url LIKE '%/demo/%'
+             OR source_url LIKE '%demo-%'
+             OR platform_content_id LIKE 'demo%'
+        )::bigint AS demoContents
     `;
     const data = row ?? {
       total: BigInt(0),
@@ -280,6 +292,7 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
       commentMissingId: BigInt(0),
       commentLinkUnmatched: BigInt(0),
       bilibiliSearchLinks: BigInt(0),
+      demoContents: BigInt(0),
     };
     res.json({
       total: Number(data.total ?? 0),
@@ -287,6 +300,7 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
       commentMissingId: Number(data.commentMissingId ?? 0),
       commentLinkUnmatched: Number(data.commentLinkUnmatched ?? 0),
       bilibiliSearchLinks: Number(data.bilibiliSearchLinks ?? 0),
+      demoContents: Number(data.demoContents ?? 0),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -570,6 +584,22 @@ router.post('/contents/cleanup-bilibili-search', requireAdmin, async (_req: Requ
       DELETE FROM "Content"
       WHERE platform_id IN (SELECT id FROM "Platform" WHERE slug = 'bilibili')
         AND source_url LIKE '%search.bilibili.com/%'
+    `;
+    res.json({ ok: true, deleted: Number(deleted) });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+/** POST /api/admin/contents/cleanup-demo — 清理示例数据 */
+router.post('/contents/cleanup-demo', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const deleted = await prisma.$executeRaw`
+      DELETE FROM "Content"
+      WHERE source_url LIKE '%/demo/%'
+         OR source_url LIKE '%demo-%'
+         OR platform_content_id LIKE 'demo%'
     `;
     res.json({ ok: true, deleted: Number(deleted) });
   } catch (e) {
