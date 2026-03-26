@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Card, Select, Input, Space, Typography, Spin, Empty, Tag, Row, Col, Pagination, DatePicker, Alert, Button, message } from 'antd';
 import { Link } from 'react-router-dom';
@@ -31,21 +31,89 @@ interface ContentItem {
 }
 
 const PAGE_SIZE = 20;
+const CONTENT_TYPES = new Set(['post', 'comment']);
+const REPLIED_TYPES = new Set(['true', 'false']);
+
+type RepliedFilter = 'true' | 'false';
+type ContentTypeFilter = 'post' | 'comment';
+
+interface AppliedFilters {
+  platformId?: string;
+  contentType?: ContentTypeFilter;
+  replied?: RepliedFilter;
+  publishedFrom?: string;
+  publishedTo?: string;
+  keyword?: string;
+  page: number;
+  pageSize: number;
+}
+
+interface ContentListResponse {
+  list?: ContentItem[];
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  appliedFilters?: AppliedFilters;
+}
+
+interface NormalizedQuery {
+  platformId?: string;
+  contentType?: ContentTypeFilter;
+  keyword?: string;
+  replied?: RepliedFilter;
+  publishedFrom?: string;
+  publishedTo?: string;
+  page: number;
+}
+
+export function normalizeContentListQuery(params: URLSearchParams): NormalizedQuery {
+  const rawPlatformId = params.get('platformId')?.trim();
+  const rawContentType = params.get('contentType')?.trim();
+  const rawKeyword = params.get('keyword')?.trim();
+  const rawReplied = params.get('replied')?.trim();
+  const rawPublishedFrom = params.get('publishedFrom')?.trim();
+  const rawPublishedTo = params.get('publishedTo')?.trim();
+  const parsedPage = parseInt(params.get('page') || '1', 10);
+
+  const normalized: NormalizedQuery = {
+    page: Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1,
+  };
+
+  if (rawPlatformId) normalized.platformId = rawPlatformId;
+  if (rawContentType && CONTENT_TYPES.has(rawContentType)) normalized.contentType = rawContentType as ContentTypeFilter;
+  if (rawKeyword) normalized.keyword = rawKeyword;
+  if (rawReplied && REPLIED_TYPES.has(rawReplied)) normalized.replied = rawReplied as RepliedFilter;
+
+  if (rawPublishedFrom) {
+    const dt = dayjs(rawPublishedFrom);
+    if (dt.isValid()) normalized.publishedFrom = dt.toISOString();
+  }
+  if (rawPublishedTo) {
+    const dt = dayjs(rawPublishedTo);
+    if (dt.isValid()) normalized.publishedTo = dt.toISOString();
+  }
+
+  return normalized;
+}
 
 export default function ContentList() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const platformId = searchParams.get('platformId') || undefined;
-  const contentType = searchParams.get('contentType') || undefined;
-  const keyword = searchParams.get('keyword') || '';
-  const replied = searchParams.get('replied') || undefined;
-  const publishedFrom = searchParams.get('publishedFrom') || undefined;
-  const publishedTo = searchParams.get('publishedTo') || undefined;
-  const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
+
+  const normalized = normalizeContentListQuery(searchParams);
+  const platformId = normalized.platformId;
+  const contentType = normalized.contentType;
+  const keyword = normalized.keyword || '';
+  const replied = normalized.replied;
+  const publishedFrom = normalized.publishedFrom;
+  const publishedTo = normalized.publishedTo;
+  const page = normalized.page;
 
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [list, setList] = useState<ContentItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
   const [keywordInput, setKeywordInput] = useState(keyword);
   const [range, setRange] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null] | null>(() => {
     if (publishedFrom && publishedTo) {
@@ -55,20 +123,7 @@ export default function ContentList() {
     }
     return null;
   });
-  useEffect(() => {
-    setKeywordInput(keyword);
-  }, [keyword]);
-  useEffect(() => {
-    if (publishedFrom && publishedTo) {
-      const start = dayjs(publishedFrom);
-      const end = dayjs(publishedTo);
-      if (start.isValid() && end.isValid()) {
-        setRange([start, end]);
-        return;
-      }
-    }
-    setRange(null);
-  }, [publishedFrom, publishedTo]);
+  const correctedNoticeShownRef = useRef(false);
 
   const updateParams = useCallback((updates: Record<string, string | undefined>) => {
     setSearchParams((prev) => {
@@ -81,21 +136,70 @@ export default function ContentList() {
       return next;
     }, { replace: true });
   }, [setSearchParams]);
+  useEffect(() => {
+    setKeywordInput(keyword);
+  }, [keyword]);
 
+  useEffect(() => {
+    if (publishedFrom && publishedTo) {
+      const start = dayjs(publishedFrom);
+      const end = dayjs(publishedTo);
+      if (start.isValid() && end.isValid()) {
+        setRange([start, end]);
+        return;
+      }
+    }
+    setRange(null);
+  }, [publishedFrom, publishedTo]);
+
+  useEffect(() => {
+    const canonical = new URLSearchParams();
+    if (platformId) canonical.set('platformId', platformId);
+    if (contentType) canonical.set('contentType', contentType);
+    if (replied) canonical.set('replied', replied);
+    if (publishedFrom) canonical.set('publishedFrom', publishedFrom);
+    if (publishedTo) canonical.set('publishedTo', publishedTo);
+    if (keyword) canonical.set('keyword', keyword);
+    if (page > 1) canonical.set('page', String(page));
+
+    const current = searchParams.toString();
+    const normalizedQuery = canonical.toString();
+    if (current !== normalizedQuery) {
+      setSearchParams(canonical, { replace: true });
+      if (!correctedNoticeShownRef.current) {
+        correctedNoticeShownRef.current = true;
+        message.info('已自动修正无效筛选参数');
+      }
+    }
+  }, [searchParams, setSearchParams, platformId, contentType, replied, publishedFrom, publishedTo, keyword, page]);
   useEffect(() => {
     const controller = new AbortController();
     fetch(`${API}/platforms`, { signal: controller.signal })
-      .then((r) => r.json())
-      .then((data) => setPlatforms(Array.isArray(data) ? data : []))
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`加载平台失败（${r.status}）`);
+        return r.json();
+      })
+      .then((data) => {
+        const nextPlatforms = Array.isArray(data) ? data : [];
+        setPlatforms(nextPlatforms);
+        if (platformId && !nextPlatforms.some((p) => p.id === platformId)) {
+          updateParams({ platformId: undefined, page: '1' });
+          if (!correctedNoticeShownRef.current) {
+            correctedNoticeShownRef.current = true;
+            message.info('检测到无效平台参数，已自动移除');
+          }
+        }
+      })
       .catch((e) => {
         if (e?.name === 'AbortError') return;
         setPlatforms([]);
       });
     return () => controller.abort();
-  }, []);
+  }, [platformId, updateParams]);
 
   useEffect(() => {
     setLoading(true);
+    setLoadError(null);
     const controller = new AbortController();
     const params = new URLSearchParams();
     if (platformId) params.set('platformId', platformId);
@@ -106,20 +210,75 @@ export default function ContentList() {
     if (keyword) params.set('keyword', keyword);
     params.set('page', String(page));
     params.set('pageSize', String(PAGE_SIZE));
+
     fetch(`${API}?${params}`, { signal: controller.signal })
-      .then((r) => r.json())
-      .then((data) => {
-        setList(data.list ?? []);
-        setTotal(data.total ?? 0);
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`列表加载失败（${r.status}）`);
+        return r.json();
+      })
+      .then((data: ContentListResponse) => {
+        const applied = data.appliedFilters;
+        const nextList = Array.isArray(data.list) ? data.list : [];
+        const nextTotal = typeof data.total === 'number' ? data.total : 0;
+
+        setList(nextList);
+        setTotal(nextTotal);
+
+        if (applied) {
+          const expected: Record<string, string | undefined> = {
+            platformId: applied.platformId,
+            contentType: applied.contentType,
+            replied: applied.replied,
+            publishedFrom: applied.publishedFrom,
+            publishedTo: applied.publishedTo,
+            keyword: applied.keyword,
+            page: applied.page > 1 ? String(applied.page) : undefined,
+          };
+          const current = {
+            platformId,
+            contentType,
+            replied,
+            publishedFrom,
+            publishedTo,
+            keyword: keyword || undefined,
+            page: page > 1 ? String(page) : undefined,
+          };
+
+          const changed = Object.keys(expected).some((key) => {
+            const k = key as keyof typeof expected;
+            return expected[k] !== current[k as keyof typeof current];
+          });
+
+          if (changed) {
+            updateParams(expected);
+            if (!correctedNoticeShownRef.current) {
+              correctedNoticeShownRef.current = true;
+              message.info('筛选参数已按系统规则自动校正');
+            }
+          }
+        }
+
+        if (nextTotal > 0) {
+          const maxPage = Math.max(1, Math.ceil(nextTotal / PAGE_SIZE));
+          if (page > maxPage) {
+            updateParams({ page: String(maxPage) });
+            if (!correctedNoticeShownRef.current) {
+              correctedNoticeShownRef.current = true;
+              message.info('当前页超出范围，已自动跳转到最后一页');
+            }
+          }
+        }
       })
       .catch((e) => {
         if (e?.name === 'AbortError') return;
         setList([]);
         setTotal(0);
+        setLoadError(e instanceof Error ? e.message : '加载失败，请稍后重试');
       })
       .finally(() => setLoading(false));
+
     return () => controller.abort();
-  }, [platformId, contentType, replied, publishedFrom, publishedTo, keyword, page]);
+  }, [platformId, contentType, replied, publishedFrom, publishedTo, keyword, page, refreshTick, updateParams]);
 
   const search = () => {
     updateParams({ keyword: keywordInput.trim(), page: '1' });
@@ -224,6 +383,19 @@ export default function ContentList() {
         message="内容来自各平台公开信息，详情以原平台链接为准。如发现重复，可在管理后台进行数据去重。"
         style={{ marginBottom: 16 }}
       />
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={
+            <Button size="small" onClick={() => setRefreshTick((v) => v + 1)}>
+              重试
+            </Button>
+          }
+          style={{ marginBottom: 16 }}
+        />
+      )}
       {loading ? (
         <div style={{ textAlign: 'center', padding: 48 }}>
           <Spin size="large" />
