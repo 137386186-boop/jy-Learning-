@@ -1,9 +1,9 @@
 import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
-import { createHash } from 'crypto';
 import { prisma } from '../lib/prisma';
 import { requireAdmin, signAdminToken } from '../lib/admin-auth';
+import { importContentsBatch, extractCommentIdFromUrl, isNumericId } from '../jobs/import-normalizer';
 
 const router = Router();
 
@@ -20,89 +20,6 @@ const importLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-
-function md5(text: string): string {
-  return createHash('md5').update(text).digest('hex');
-}
-
-function toTags(input: unknown): string[] {
-  if (Array.isArray(input)) {
-    return input.map((t) => String(t).trim()).filter(Boolean);
-  }
-  if (typeof input === 'string') {
-    return input
-      .split(/[,，;；\n]+/)
-      .map((t) => t.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
-
-function toDate(input: unknown): Date | null {
-  if (!input) return null;
-  const d = new Date(String(input));
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function isBilibiliVideoUrl(sourceUrl: string): boolean {
-  try {
-    const url = new URL(sourceUrl);
-    const host = url.hostname.toLowerCase();
-    if (host.startsWith('search.')) return false;
-    if (!host.endsWith('bilibili.com')) return false;
-    return url.pathname.startsWith('/video/');
-  } catch {
-    return false;
-  }
-}
-
-function isBilibiliSearchUrl(sourceUrl: string): boolean {
-  try {
-    const url = new URL(sourceUrl);
-    return url.hostname.toLowerCase() === 'search.bilibili.com';
-  } catch {
-    return false;
-  }
-}
-
-function isDemoContent(sourceUrl: string, platformContentId?: string | null): boolean {
-  const id = platformContentId || '';
-  if (id.startsWith('demo')) return true;
-  return /\/demo\/|demo-/.test(sourceUrl);
-}
-
-function isNumericId(input: string | null | undefined): boolean {
-  if (!input) return false;
-  return /^[0-9]+$/.test(input);
-}
-
-function extractCommentIdFromUrl(sourceUrl: string): string | null {
-  try {
-    const url = new URL(sourceUrl);
-    const rootId = url.searchParams.get('comment_root_id');
-    if (rootId && isNumericId(rootId)) return rootId;
-    const hash = url.hash || '';
-    let match = hash.match(/reply(\d+)/);
-    if (match && isNumericId(match[1])) return match[1];
-    match = hash.match(/comment-(\d+)/);
-    if (match && isNumericId(match[1])) return match[1];
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function isValidSourceUrl(input: string): boolean {
-  try {
-    const url = new URL(input);
-    if (!['http:', 'https:'].includes(url.protocol)) return false;
-    if (!url.hostname) return false;
-    const path = url.pathname?.trim() ?? '';
-    return path.length > 1 && path !== '/';
-  } catch {
-    return false;
-  }
-}
 
 /** POST /api/admin/login — 管理员登录，返回 token */
 router.post('/login', loginLimiter, async (req: Request, res: Response) => {
@@ -173,15 +90,21 @@ router.get('/platform-auth', requireAdmin, async (_req: Request, res: Response) 
     });
     const oauthSupported = new Set(['zhihu']);
     res.json(
-      platforms.map((p) => ({
-        id: p.id,
-        name: p.name,
-        slug: p.slug,
-        enabled: p.enabled,
-        oauthSupported: oauthSupported.has(p.slug),
-        authStatus: p.auth?.status ?? 'unauthed',
-        authorizedAt: p.auth?.authorizedAt ?? null,
-      }))
+      platforms.map((p) => {
+        const supported = oauthSupported.has(p.slug);
+        const authed = supported && p.auth?.status === 'authed';
+        const authState = supported ? (authed ? 'authed' : 'unauthed') : 'unsupported';
+        return {
+          id: p.id,
+          name: p.name,
+          slug: p.slug,
+          enabled: p.enabled,
+          oauthSupported: supported,
+          authStatus: authState,
+          authState,
+          authorizedAt: authed ? p.auth?.authorizedAt ?? null : null,
+        };
+      })
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -244,16 +167,18 @@ router.delete('/reply-templates/:id', requireAdmin, async (req: Request, res: Re
 /** GET /api/admin/contents/quality — 数据质量报告 */
 router.get('/contents/quality', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const [row] = await prisma.$queryRaw<
-      {
-        total: bigint;
-        duplicates: bigint;
-        commentMissingId: bigint;
-        commentLinkUnmatched: bigint;
-        bilibiliSearchLinks: bigint;
-        demoContents: bigint;
-      }[]
-    >`
+    const [summaryRows, platformRows] = await Promise.all([
+      prisma.$queryRaw<
+        {
+          total: bigint;
+          duplicates: bigint;
+          commentMissingId: bigint;
+          commentLinkUnmatched: bigint;
+          bilibiliSearchLinks: bigint;
+          demoContents: bigint;
+          badTemplateLinks: bigint;
+        }[]
+      >`
       WITH ranked AS (
         SELECT id,
                ROW_NUMBER() OVER (
@@ -284,16 +209,62 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
           WHERE source_url LIKE '%/demo/%'
              OR source_url LIKE '%demo-%'
              OR platform_content_id LIKE 'demo%'
-        )::bigint AS demoContents
-    `;
-    const data = row ?? {
+        )::bigint AS demoContents,
+        (SELECT COUNT(*) FROM "Content"
+          WHERE LOWER(source_url) LIKE '%example.com%'
+             OR LOWER(source_url) LIKE '%localhost%'
+             OR LOWER(source_url) LIKE '%/demo/%'
+             OR LOWER(source_url) LIKE '%demo-%'
+             OR LOWER(source_url) LIKE '%replace_me%'
+             OR LOWER(source_url) LIKE '%your-url%'
+             OR source_url LIKE '%{id}%'
+             OR source_url LIKE '%<id>%'
+             OR source_url LIKE '%{{%'
+        )::bigint AS badTemplateLinks
+    `,
+      prisma.$queryRaw<
+        {
+          platformId: string;
+          platformSlug: string;
+          platformName: string;
+          total: bigint;
+          badTemplateLinks: bigint;
+        }[]
+      >`
+      SELECT
+        p.id AS "platformId",
+        p.slug AS "platformSlug",
+        p.name AS "platformName",
+        COUNT(*)::bigint AS total,
+        SUM(
+          CASE WHEN LOWER(c.source_url) LIKE '%example.com%'
+                 OR LOWER(c.source_url) LIKE '%localhost%'
+                 OR LOWER(c.source_url) LIKE '%/demo/%'
+                 OR LOWER(c.source_url) LIKE '%demo-%'
+                 OR LOWER(c.source_url) LIKE '%replace_me%'
+                 OR LOWER(c.source_url) LIKE '%your-url%'
+                 OR c.source_url LIKE '%{id}%'
+                 OR c.source_url LIKE '%<id>%'
+                 OR c.source_url LIKE '%{{%'
+               THEN 1 ELSE 0 END
+        )::bigint AS "badTemplateLinks"
+      FROM "Content" c
+      JOIN "Platform" p ON p.id = c.platform_id
+      GROUP BY p.id, p.slug, p.name
+      ORDER BY total DESC
+    `,
+    ]);
+
+    const data = summaryRows?.[0] ?? {
       total: BigInt(0),
       duplicates: BigInt(0),
       commentMissingId: BigInt(0),
       commentLinkUnmatched: BigInt(0),
       bilibiliSearchLinks: BigInt(0),
       demoContents: BigInt(0),
+      badTemplateLinks: BigInt(0),
     };
+
     res.json({
       total: Number(data.total ?? 0),
       duplicates: Number(data.duplicates ?? 0),
@@ -301,6 +272,14 @@ router.get('/contents/quality', requireAdmin, async (_req: Request, res: Respons
       commentLinkUnmatched: Number(data.commentLinkUnmatched ?? 0),
       bilibiliSearchLinks: Number(data.bilibiliSearchLinks ?? 0),
       demoContents: Number(data.demoContents ?? 0),
+      badTemplateLinks: Number(data.badTemplateLinks ?? 0),
+      platformDistribution: (platformRows || []).map((row) => ({
+        platformId: row.platformId,
+        platformSlug: row.platformSlug,
+        platformName: row.platformName,
+        total: Number(row.total ?? 0),
+        badTemplateLinks: Number(row.badTemplateLinks ?? 0),
+      })),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -317,189 +296,19 @@ router.post('/contents/import', requireAdmin, importLimiter, async (req: Request
       return;
     }
 
-    const slugs = Array.from(
-      new Set(
-        items
-          .map((it) => (it && typeof it === 'object' ? (it as any).platformSlug : null))
-          .filter((v) => typeof v === 'string' && v.trim())
-          .map((v: string) => v.trim())
-      )
-    );
-
-    const platformMap = new Map<string, string>();
-    if (slugs.length > 0) {
-      const exist = await prisma.platform.findMany({ where: { slug: { in: slugs } } });
-      exist.forEach((p) => platformMap.set(p.slug, p.id));
-      const missing = slugs.filter((s) => !platformMap.has(s));
-      for (const slug of missing) {
-        const created = await prisma.platform.create({
-          data: { slug, name: slug },
-          select: { id: true, slug: true },
-        });
-        platformMap.set(created.slug, created.id);
-      }
-    }
-
-    const normalized: {
-      index: number;
-      data: {
-        platformId: string;
-        contentType: 'post' | 'comment';
-        platformContentId?: string | null;
-        authorName: string;
-        authorId?: string | null;
-        authorAvatar?: string | null;
-        body: string;
-        bodyMd5: string;
-        publishedAt: Date;
-        sourceUrl: string;
-        keywordTags: string[];
-        likeCount?: number | null;
-        commentCount?: number | null;
-        summary?: string | null;
-      };
-    }[] = [];
-
-    const errors: { index: number; reason: string }[] = [];
-
-    items.forEach((raw, index) => {
-      if (!raw || typeof raw !== 'object') {
-        errors.push({ index, reason: 'invalid item' });
-        return;
-      }
-      const it = raw as any;
-      const platformSlug = it.platformSlug ? String(it.platformSlug).trim() : null;
-      const platformId = it.platformId || (it.platformSlug ? platformMap.get(String(it.platformSlug)) : null);
-      if (!platformId) {
-        errors.push({ index, reason: 'platformId or platformSlug required' });
-        return;
-      }
-      const body = String(it.body || '').trim();
-      const authorName = String(it.authorName || '').trim();
-      const sourceUrl = String(it.sourceUrl || '').trim();
-      const publishedAt = toDate(it.publishedAt);
-      if (!body || !authorName || !sourceUrl || !publishedAt) {
-        errors.push({ index, reason: 'authorName, body, sourceUrl, publishedAt required' });
-        return;
-      }
-      if (!isValidSourceUrl(sourceUrl)) {
-        errors.push({ index, reason: 'sourceUrl must be a direct link to a specific post/comment' });
-        return;
-      }
-      if (platformSlug === 'bilibili' && !isBilibiliVideoUrl(sourceUrl)) {
-        errors.push({ index, reason: 'bilibili sourceUrl must be a video page, not search results' });
-        return;
-      }
-      const contentType = it.contentType === 'comment' ? 'comment' : 'post';
-      let platformContentId = it.platformContentId ? String(it.platformContentId) : null;
-      if (contentType === 'comment' && !platformContentId) {
-        const extracted = extractCommentIdFromUrl(sourceUrl);
-        if (extracted) platformContentId = extracted;
-      }
-      if (contentType === 'comment' && platformContentId && !sourceUrl.includes(platformContentId)) {
-        errors.push({ index, reason: 'comment sourceUrl must include platformContentId for precise定位' });
-        return;
-      }
-      if (platformSlug === 'bilibili' && contentType === 'comment' && !isNumericId(platformContentId)) {
-        errors.push({ index, reason: 'bilibili comment platformContentId must be numeric comment_root_id' });
-        return;
-      }
-      const likeCount =
-        it.likeCount == null || Number.isNaN(Number(it.likeCount)) ? null : Number(it.likeCount);
-      const commentCount =
-        it.commentCount == null || Number.isNaN(Number(it.commentCount)) ? null : Number(it.commentCount);
-      normalized.push({
-        index,
-        data: {
-          platformId,
-          contentType,
-          platformContentId,
-          authorName,
-          authorId: it.authorId ? String(it.authorId) : null,
-          authorAvatar: it.authorAvatar ? String(it.authorAvatar) : null,
-          body,
-          bodyMd5: md5(body),
-          publishedAt,
-          sourceUrl,
-          keywordTags: toTags(it.keywordTags),
-          likeCount,
-          commentCount,
-          summary: it.summary ? String(it.summary) : body.slice(0, 120),
-        },
-      });
-    });
-
-    if (normalized.length === 0) {
-      res.status(400).json({ error: 'no valid items', errors });
+    const importResult = await importContentsBatch(items);
+    if (!importResult.hasValidItems) {
+      res.status(400).json({ error: 'no valid items', errors: importResult.errors });
       return;
     }
 
-    const platformIds = Array.from(new Set(normalized.map((n) => n.data.platformId)));
-    const platformContentIds = Array.from(
-      new Set(normalized.map((n) => n.data.platformContentId).filter((v): v is string => !!v))
-    );
-    const sourceUrls = Array.from(new Set(normalized.map((n) => n.data.sourceUrl).filter(Boolean)));
-
-    const existingKeys = new Set<string>();
-    if (platformContentIds.length > 0) {
-      const existByPlatformContentId = await prisma.content.findMany({
-        where: {
-          platformId: { in: platformIds },
-          platformContentId: { in: platformContentIds },
-        },
-        select: { platformId: true, platformContentId: true },
-      });
-      existByPlatformContentId.forEach((e) => {
-        if (e.platformContentId) existingKeys.add(`pcid:${e.platformId}:${e.platformContentId}`);
-      });
-    }
-    if (sourceUrls.length > 0) {
-      const existBySourceUrl = await prisma.content.findMany({
-        where: {
-          platformId: { in: platformIds },
-          sourceUrl: { in: sourceUrls },
-        },
-        select: { platformId: true, sourceUrl: true },
-      });
-      existBySourceUrl.forEach((e) => {
-        existingKeys.add(`url:${e.platformId}:${e.sourceUrl}`);
-      });
-    }
-
-    const incomingKeys = new Set<string>();
-    const filtered = normalized.filter((n) => {
-      const keyByContentId = n.data.platformContentId
-        ? `pcid:${n.data.platformId}:${n.data.platformContentId}`
-        : null;
-      const keyByUrl = `url:${n.data.platformId}:${n.data.sourceUrl}`;
-      const isDup = (keyByContentId && existingKeys.has(keyByContentId)) || existingKeys.has(keyByUrl);
-      const isIncomingDup =
-        (keyByContentId && incomingKeys.has(keyByContentId)) || incomingKeys.has(keyByUrl);
-      if (isDup) {
-        errors.push({ index: n.index, reason: 'duplicate (platformContentId/sourceUrl)' });
-        return false;
-      }
-      if (isIncomingDup) {
-        errors.push({ index: n.index, reason: 'duplicate inside import batch' });
-        return false;
-      }
-      if (keyByContentId) incomingKeys.add(keyByContentId);
-      incomingKeys.add(keyByUrl);
-      return true;
-    });
-
-    const result = await prisma.content.createMany({
-      data: filtered.map((n) => n.data),
-      skipDuplicates: true,
-    });
-
     res.json({
       ok: true,
-      total: items.length,
-      inserted: result.count,
-      invalid: errors.length,
-      skipped: normalized.length - filtered.length,
-      errors,
+      total: importResult.total,
+      inserted: importResult.inserted,
+      invalid: importResult.invalid,
+      skipped: importResult.skipped,
+      errors: importResult.errors,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';

@@ -12,6 +12,8 @@
     "test": "vitest run",
     "admin:create": "tsx src/scripts/create-admin.ts",
     "admin:create:prod": "node dist/scripts/create-admin.js",
+    "sync:run": "tsx src/scripts/run-sync.ts",
+    "sync:run:prod": "node dist/scripts/run-sync.js",
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "db:seed": "tsx prisma/seed.ts",

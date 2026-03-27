@@ -14,6 +14,8 @@ services:
         value: "REPLACE_WITH_DIRECT_URL"
       - key: JWT_SECRET
         value: "REPLACE_WITH_RANDOM_SECRET"
+      - key: ADMIN_TOKEN_TTL
+        value: "7d"
       - key: ADMIN_PASSWORD
         value: "REPLACE_WITH_ADMIN_PASSWORD"
       - key: ADMIN_USERNAME
@@ -28,3 +30,37 @@ services:
         value: ""
       - key: ZHIHU_CLIENT_SECRET
         value: ""
+
+  - type: cron
+    name: academic-content-platform-sync
+    env: node
+    plan: starter
+    rootDir: backend
+    schedule: "0 12 * * *"
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: npm run sync:run:prod
+    envVars:
+      - key: DATABASE_URL
+        value: "REPLACE_WITH_DATABASE_URL"
+      - key: DIRECT_URL
+        value: "REPLACE_WITH_DIRECT_URL"
+      - key: JWT_SECRET
+        value: "REPLACE_WITH_RANDOM_SECRET"
+      - key: CORS_ORIGIN
+        value: "https://jylearning.com,https://www.jylearning.com"
+      - key: FRONTEND_ORIGIN
+        value: "https://jylearning.com"
+      - key: ZHIHU_CLIENT_ID
+        value: ""
+      - key: ZHIHU_CLIENT_SECRET
+        value: ""
+      - key: SYNC_PLATFORMS
+        value: "bilibili,zhihu"
+      - key: SYNC_KEYWORDS
+        value: "SCI,论文,专利,投稿,发表论文,发表期刊"
+      - key: ADMIN_TOKEN_TTL
+        value: "7d"
+      - key: SYNC_PER_KEYWORD
+        value: "40"
+      - key: SYNC_INPUT_JSON
+        value: "../tools/collector/output.json"

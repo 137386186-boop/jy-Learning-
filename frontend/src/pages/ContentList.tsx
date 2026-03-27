@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Card, Select, Input, Space, Typography, Spin, Empty, Tag, Row, Col, Pagination, DatePicker, Alert, Button, message } from 'antd';
 import { Link } from 'react-router-dom';
@@ -96,6 +96,18 @@ export function normalizeContentListQuery(params: URLSearchParams): NormalizedQu
   return normalized;
 }
 
+export function toContentListSearchParams(query: NormalizedQuery): URLSearchParams {
+  const params = new URLSearchParams();
+  if (query.platformId) params.set('platformId', query.platformId);
+  if (query.contentType) params.set('contentType', query.contentType);
+  if (query.replied) params.set('replied', query.replied);
+  if (query.publishedFrom) params.set('publishedFrom', query.publishedFrom);
+  if (query.publishedTo) params.set('publishedTo', query.publishedTo);
+  if (query.keyword) params.set('keyword', query.keyword);
+  if (query.page > 1) params.set('page', String(query.page));
+  return params;
+}
+
 export default function ContentList() {
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -123,7 +135,9 @@ export default function ContentList() {
     }
     return null;
   });
-  const correctedNoticeShownRef = useRef(false);
+  const [platformsReady, setPlatformsReady] = useState(false);
+  const [filterNotice, setFilterNotice] = useState<string | null>(null);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   const updateParams = useCallback((updates: Record<string, string | undefined>) => {
     setSearchParams((prev) => {
@@ -136,6 +150,16 @@ export default function ContentList() {
       return next;
     }, { replace: true });
   }, [setSearchParams]);
+
+  useEffect(() => {
+    const canonicalQuery = toContentListSearchParams(normalized).toString();
+    const currentQuery = searchParams.toString();
+    if (currentQuery !== canonicalQuery) {
+      setSearchParams(new URLSearchParams(canonicalQuery), { replace: true });
+      setFilterNotice('已自动修正无效筛选参数');
+    }
+  }, [platformId, contentType, replied, publishedFrom, publishedTo, keyword, page, searchParams, setSearchParams]);
+
   useEffect(() => {
     setKeywordInput(keyword);
   }, [keyword]);
@@ -153,26 +177,6 @@ export default function ContentList() {
   }, [publishedFrom, publishedTo]);
 
   useEffect(() => {
-    const canonical = new URLSearchParams();
-    if (platformId) canonical.set('platformId', platformId);
-    if (contentType) canonical.set('contentType', contentType);
-    if (replied) canonical.set('replied', replied);
-    if (publishedFrom) canonical.set('publishedFrom', publishedFrom);
-    if (publishedTo) canonical.set('publishedTo', publishedTo);
-    if (keyword) canonical.set('keyword', keyword);
-    if (page > 1) canonical.set('page', String(page));
-
-    const current = searchParams.toString();
-    const normalizedQuery = canonical.toString();
-    if (current !== normalizedQuery) {
-      setSearchParams(canonical, { replace: true });
-      if (!correctedNoticeShownRef.current) {
-        correctedNoticeShownRef.current = true;
-        message.info('已自动修正无效筛选参数');
-      }
-    }
-  }, [searchParams, setSearchParams, platformId, contentType, replied, publishedFrom, publishedTo, keyword, page]);
-  useEffect(() => {
     const controller = new AbortController();
     fetch(`${API}/platforms`, { signal: controller.signal })
       .then(async (r) => {
@@ -182,20 +186,22 @@ export default function ContentList() {
       .then((data) => {
         const nextPlatforms = Array.isArray(data) ? data : [];
         setPlatforms(nextPlatforms);
-        if (platformId && !nextPlatforms.some((p) => p.id === platformId)) {
-          updateParams({ platformId: undefined, page: '1' });
-          if (!correctedNoticeShownRef.current) {
-            correctedNoticeShownRef.current = true;
-            message.info('检测到无效平台参数，已自动移除');
-          }
-        }
       })
       .catch((e) => {
         if (e?.name === 'AbortError') return;
         setPlatforms([]);
-      });
+      })
+      .finally(() => setPlatformsReady(true));
     return () => controller.abort();
-  }, [platformId, updateParams]);
+  }, []);
+
+  useEffect(() => {
+    if (!platformsReady || !platformId) return;
+    const exists = platforms.some((p) => p.id === platformId);
+    if (exists) return;
+    updateParams({ platformId: undefined, page: '1' });
+    setFilterNotice('检测到无效平台参数，已自动移除');
+  }, [platformId, platforms, platformsReady, updateParams]);
 
   useEffect(() => {
     setLoading(true);
@@ -223,38 +229,32 @@ export default function ContentList() {
 
         setList(nextList);
         setTotal(nextTotal);
+        setHasLoadedOnce(true);
 
         if (applied) {
-          const expected: Record<string, string | undefined> = {
+          const expectedNormalized: NormalizedQuery = {
             platformId: applied.platformId,
             contentType: applied.contentType,
             replied: applied.replied,
             publishedFrom: applied.publishedFrom,
             publishedTo: applied.publishedTo,
             keyword: applied.keyword,
-            page: applied.page > 1 ? String(applied.page) : undefined,
+            page: Math.max(1, applied.page || 1),
           };
-          const current = {
+          const currentNormalized: NormalizedQuery = {
             platformId,
             contentType,
             replied,
             publishedFrom,
             publishedTo,
             keyword: keyword || undefined,
-            page: page > 1 ? String(page) : undefined,
+            page,
           };
-
-          const changed = Object.keys(expected).some((key) => {
-            const k = key as keyof typeof expected;
-            return expected[k] !== current[k as keyof typeof current];
-          });
-
-          if (changed) {
-            updateParams(expected);
-            if (!correctedNoticeShownRef.current) {
-              correctedNoticeShownRef.current = true;
-              message.info('筛选参数已按系统规则自动校正');
-            }
+          const expected = toContentListSearchParams(expectedNormalized);
+          const current = toContentListSearchParams(currentNormalized);
+          if (expected.toString() !== current.toString()) {
+            setSearchParams(expected, { replace: true });
+            setFilterNotice('筛选参数已按系统规则自动校正');
           }
         }
 
@@ -262,10 +262,7 @@ export default function ContentList() {
           const maxPage = Math.max(1, Math.ceil(nextTotal / PAGE_SIZE));
           if (page > maxPage) {
             updateParams({ page: String(maxPage) });
-            if (!correctedNoticeShownRef.current) {
-              correctedNoticeShownRef.current = true;
-              message.info('当前页超出范围，已自动跳转到最后一页');
-            }
+            setFilterNotice('当前页超出范围，已自动跳转到最后一页');
           }
         }
       })
@@ -273,12 +270,13 @@ export default function ContentList() {
         if (e?.name === 'AbortError') return;
         setList([]);
         setTotal(0);
+        setHasLoadedOnce(true);
         setLoadError(e instanceof Error ? e.message : '加载失败，请稍后重试');
       })
       .finally(() => setLoading(false));
 
     return () => controller.abort();
-  }, [platformId, contentType, replied, publishedFrom, publishedTo, keyword, page, refreshTick, updateParams]);
+  }, [platformId, contentType, replied, publishedFrom, publishedTo, keyword, page, refreshTick, normalized, setSearchParams, updateParams]);
 
   const search = () => {
     updateParams({ keyword: keywordInput.trim(), page: '1' });
@@ -296,9 +294,9 @@ export default function ContentList() {
   return (
     <div>
       <div className="hero">
-        <h2 className="hero-title">学术内容聚合平台</h2>
+        <h2 className="hero-title">学术同路人</h2>
         <p className="hero-subtitle">
-          统一查看多平台的学术讨论与问题，支持关键词筛选与快速回复。
+          聚合多平台学术讨论与问答，支持精准筛选、快速定位与高效回复。
         </p>
         <div className="hero-stats">
           <div className="stat-card">
@@ -377,6 +375,16 @@ export default function ContentList() {
         />
         </Space>
       </div>
+      {filterNotice && (
+        <Alert
+          type="warning"
+          showIcon
+          closable
+          message={filterNotice}
+          onClose={() => setFilterNotice(null)}
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Alert
         type="info"
         showIcon
@@ -396,8 +404,8 @@ export default function ContentList() {
           style={{ marginBottom: 16 }}
         />
       )}
-      {loading ? (
-        <div style={{ textAlign: 'center', padding: 48 }}>
+      {(loading && !hasLoadedOnce) ? (
+        <div style={{ textAlign: 'center', padding: 48, minHeight: 220 }}>
           <Spin size="large" />
         </div>
       ) : list.length === 0 ? (

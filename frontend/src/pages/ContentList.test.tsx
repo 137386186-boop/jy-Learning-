@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeContentListQuery } from './ContentList';
+import { normalizeContentListQuery, toContentListSearchParams } from './ContentList';
 
 describe('normalizeContentListQuery', () => {
   it('drops invalid filter values', () => {
@@ -36,5 +36,35 @@ describe('normalizeContentListQuery', () => {
       publishedFrom: '2026-01-01T00:00:00.000Z',
       publishedTo: '2026-01-31T23:59:59.000Z',
     });
+  });
+});
+
+describe('toContentListSearchParams', () => {
+  it('keeps valid deep link filters', () => {
+    const params = toContentListSearchParams({
+      platformId: 'plat_123',
+      contentType: 'post',
+      page: 1,
+    });
+
+    expect(params.toString()).toBe('platformId=plat_123&contentType=post');
+  });
+
+  it('normalizes first page by removing page=1', () => {
+    const params = toContentListSearchParams({
+      keyword: 'abc',
+      page: 1,
+    });
+
+    expect(params.toString()).toBe('keyword=abc');
+  });
+
+  it('keeps page when greater than one', () => {
+    const params = toContentListSearchParams({
+      contentType: 'comment',
+      page: 4,
+    });
+
+    expect(params.toString()).toBe('contentType=comment&page=4');
   });
 });

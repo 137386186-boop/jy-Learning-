@@ -42,6 +42,20 @@ function decodeState(state: string): string | null {
   }
 }
 
+function formatOAuthConfigError(error: unknown): string {
+  const msg = error instanceof Error ? error.message : '';
+  if (msg.includes('ZHIHU_CLIENT_ID not configured')) {
+    return 'Zhihu OAuth is not configured: missing env ZHIHU_CLIENT_ID';
+  }
+  if (msg.includes('ZHIHU OAuth not configured')) {
+    const missing: string[] = [];
+    if (!process.env.ZHIHU_CLIENT_ID) missing.push('ZHIHU_CLIENT_ID');
+    if (!process.env.ZHIHU_CLIENT_SECRET) missing.push('ZHIHU_CLIENT_SECRET');
+    return `Zhihu OAuth is not configured: missing env ${missing.join(', ') || 'ZHIHU_CLIENT_ID, ZHIHU_CLIENT_SECRET'}`;
+  }
+  return msg || 'OAuth config error';
+}
+
 /** GET /api/oauth/zhihu/url — 返回知乎授权页 URL（供前端 location.href，避免整页跳到 /api 导致白屏） */
 router.get('/zhihu/url', requireAdmin, oauthLimiter, (req: Request, res: Response) => {
   try {
@@ -51,8 +65,7 @@ router.get('/zhihu/url', requireAdmin, oauthLimiter, (req: Request, res: Respons
     const url = getZhihuAuthUrl(redirectUri, state);
     res.json({ url });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'OAuth config error';
-    res.status(500).json({ error: msg });
+    res.status(500).json({ error: formatOAuthConfigError(e) });
   }
 });
 
@@ -73,8 +86,7 @@ router.get('/zhihu', requireAdmin, oauthLimiter, (req: Request, res: Response) =
     }
     res.redirect(302, url);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'OAuth config error';
-    res.status(500).json({ error: msg });
+    res.status(500).json({ error: formatOAuthConfigError(e) });
   }
 });
 
