@@ -89,17 +89,25 @@ router.get('/platform-auth', requireAdmin, async (_req: Request, res: Response) 
       },
     });
     const oauthSupported = new Set(['zhihu']);
+    const zhihuOAuthConfigured = !!process.env.ZHIHU_CLIENT_ID && !!process.env.ZHIHU_CLIENT_SECRET;
     res.json(
       platforms.map((p) => {
         const supported = oauthSupported.has(p.slug);
         const authed = supported && p.auth?.status === 'authed';
         const authState = supported ? (authed ? 'authed' : 'unauthed') : 'unsupported';
+        const oauthConfigured = p.slug === 'zhihu' ? zhihuOAuthConfigured : false;
+        const oauthConfigError =
+          p.slug === 'zhihu' && !zhihuOAuthConfigured
+            ? '未配置 ZHIHU_CLIENT_ID / ZHIHU_CLIENT_SECRET'
+            : null;
         return {
           id: p.id,
           name: p.name,
           slug: p.slug,
           enabled: p.enabled,
           oauthSupported: supported,
+          oauthConfigured,
+          oauthConfigError,
           authStatus: authState,
           authState,
           authorizedAt: authed ? p.auth?.authorizedAt ?? null : null,

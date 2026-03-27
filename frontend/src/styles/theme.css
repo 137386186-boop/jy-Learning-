@@ -196,6 +196,10 @@ body {
   box-shadow: var(--shadow);
 }
 
+.admin-tab-shell {
+  min-height: 780px;
+}
+
 .admin-tabs .ant-tabs-nav::before {
   border-bottom: none;
 }

@@ -12,6 +12,8 @@ interface PlatformAuth {
   slug: string;
   enabled: boolean;
   oauthSupported: boolean;
+  oauthConfigured?: boolean;
+  oauthConfigError?: string | null;
   authStatus: string;
   authState?: 'authed' | 'unauthed' | 'unsupported';
   authorizedAt: string | null;
@@ -114,6 +116,7 @@ export function AdminOauthContent() {
           const state = p.authState ?? (p.oauthSupported ? (p.authStatus === 'authed' ? 'authed' : 'unauthed') : 'unsupported');
           const authed = state === 'authed';
           const unsupported = state === 'unsupported';
+          const misconfigured = p.oauthSupported && p.oauthConfigured === false;
           return (
             <Col xs={24} md={12} xl={8} key={p.id}>
               <Card
@@ -121,17 +124,26 @@ export function AdminOauthContent() {
                 extra={
                   authed ? <Tag color="green">已授权</Tag>
                     : unsupported ? <Tag color="default">暂不支持 OAuth</Tag>
-                      : <Tag color="orange">未授权</Tag>
+                      : misconfigured ? <Tag color="red">未配置</Tag>
+                        : <Tag color="orange">未授权</Tag>
                 }
                 className="admin-card"
               >
                 <p>平台标识：{p.slug}</p>
+                {misconfigured && p.oauthConfigError && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message={p.oauthConfigError}
+                    style={{ marginBottom: 12 }}
+                  />
+                )}
                 {p.oauthSupported ? (
                   <Button
                     type="primary"
                     onClick={p.slug === 'zhihu' ? goZhihuOAuth : undefined}
                     loading={loading && p.slug === 'zhihu'}
-                    disabled={!hasToken}
+                    disabled={!hasToken || misconfigured}
                     block
                   >
                     前往{p.name}授权

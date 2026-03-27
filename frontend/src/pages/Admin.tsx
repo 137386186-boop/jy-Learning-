@@ -609,33 +609,37 @@ export default function Admin() {
         </div>
       )}
       <Divider />
-      <Tabs
-        className="admin-tabs"
-        activeKey={activeTab}
-        onChange={(tab) => {
-          const next = new URLSearchParams(searchParams);
-          if (tab === 'oauth') next.delete('tab');
-          else next.set('tab', tab);
-          setSearchParams(next, { replace: true });
-        }}
-        items={[
-          {
-            key: 'oauth',
-            label: '平台授权',
-            children: <AdminOauthContent />,
-          },
-          {
-            key: 'import',
-            label: '内容导入',
-            children: <ImportPanel />,
-          },
-          {
-            key: 'quality',
-            label: '数据质量',
-            children: <DataQualityPanel />,
-          },
-        ]}
-      />
+      <div className="admin-tab-shell">
+        <Tabs
+          className="admin-tabs"
+          activeKey={activeTab}
+          animated={false}
+          destroyInactiveTabPane={false}
+          onChange={(tab) => {
+            const next = new URLSearchParams(searchParams);
+            if (tab === 'oauth') next.delete('tab');
+            else next.set('tab', tab);
+            setSearchParams(next, { replace: true });
+          }}
+          items={[
+            {
+              key: 'oauth',
+              label: '平台授权',
+              children: <AdminOauthContent />,
+            },
+            {
+              key: 'import',
+              label: '内容导入',
+              children: <ImportPanel />,
+            },
+            {
+              key: 'quality',
+              label: '数据质量',
+              children: <DataQualityPanel />,
+            },
+          ]}
+        />
+      </div>
     </div>
   );
 }
