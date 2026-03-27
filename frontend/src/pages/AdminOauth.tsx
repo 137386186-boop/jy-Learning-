@@ -116,7 +116,7 @@ export function AdminOauthContent() {
           const state = p.authState ?? (p.oauthSupported ? (p.authStatus === 'authed' ? 'authed' : 'unauthed') : 'unsupported');
           const authed = state === 'authed';
           const unsupported = state === 'unsupported';
-          const misconfigured = p.oauthSupported && p.oauthConfigured === false;
+          const misconfigured = p.oauthSupported && p.slug === 'zhihu' && p.oauthConfigured !== true;
           return (
             <Col xs={24} md={12} xl={8} key={p.id}>
               <Card
@@ -130,11 +130,11 @@ export function AdminOauthContent() {
                 className="admin-card"
               >
                 <p>平台标识：{p.slug}</p>
-                {misconfigured && p.oauthConfigError && (
+                {misconfigured && (
                   <Alert
                     type="error"
                     showIcon
-                    message={p.oauthConfigError}
+                    message={p.oauthConfigError || '未配置 ZHIHU_CLIENT_ID / ZHIHU_CLIENT_SECRET'}
                     style={{ marginBottom: 12 }}
                   />
                 )}

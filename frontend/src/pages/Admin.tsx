@@ -542,8 +542,8 @@ export default function Admin() {
     if (!tabFromQuery) return;
     if (validTabs.includes(tabFromQuery as (typeof validTabs)[number])) return;
     const next = new URLSearchParams(searchParams);
-    next.set('tab', 'oauth');
-    setSearchParams(next, { replace: true });
+    next.delete('tab');
+    setSearchParams(next, { replace: true, preventScrollReset: true });
   }, [tabFromQuery, searchParams, setSearchParams]);
 
   if (checking) {
@@ -619,7 +619,7 @@ export default function Admin() {
             const next = new URLSearchParams(searchParams);
             if (tab === 'oauth') next.delete('tab');
             else next.set('tab', tab);
-            setSearchParams(next, { replace: true });
+            setSearchParams(next, { replace: true, preventScrollReset: true });
           }}
           items={[
             {
