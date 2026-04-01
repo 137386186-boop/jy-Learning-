@@ -36,6 +36,12 @@ If you do want a separate dev database, create a new Supabase project and use it
    - `ADMIN_PASSWORD` (only needed for seeding or resets)
    - `CORS_ORIGIN` (e.g. `https://jylearning.com,https://www.jylearning.com`)
    - `FRONTEND_ORIGIN` (e.g. `https://jylearning.com`)
+   - `REDIS_URL`
+   - `CONTACT_COOLDOWN_SEC` (default `86400`)
+   - `BILI_QQ` / `BILI_WECHAT` (optional contact info for `/api/bili-experiment/draft`)
+   - `BILIBILI_COOKIE` (required for real `/api/bili-experiment/send` dispatch)
+   - `BILI_SEND_ENABLED` (default `1`)
+   - `BILI_SEND_CONFIRM_TTL_SEC` (default `300`)
    - `ZHIHU_CLIENT_ID`
    - `ZHIHU_CLIENT_SECRET`
 6. Deploy and note the backend public URL.

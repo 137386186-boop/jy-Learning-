@@ -30,6 +30,20 @@ services:
         value: ""
       - key: ZHIHU_CLIENT_SECRET
         value: ""
+      - key: REDIS_URL
+        value: "REPLACE_WITH_REDIS_URL"
+      - key: CONTACT_COOLDOWN_SEC
+        value: "86400"
+      - key: BILI_QQ
+        value: ""
+      - key: BILI_WECHAT
+        value: ""
+      - key: BILIBILI_COOKIE
+        value: ""
+      - key: BILI_SEND_ENABLED
+        value: "1"
+      - key: BILI_SEND_CONFIRM_TTL_SEC
+        value: "300"
 
   - type: cron
     name: academic-content-platform-sync
