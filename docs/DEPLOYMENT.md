@@ -36,6 +36,12 @@ If you do want a separate dev database, create a new Supabase project and use it
    - `ADMIN_PASSWORD` (only needed for seeding or resets)
    - `CORS_ORIGIN` (e.g. `https://jylearning.com,https://www.jylearning.com`)
    - `FRONTEND_ORIGIN` (e.g. `https://jylearning.com`)
+   - `REDIS_URL`
+   - `CONTACT_COOLDOWN_SEC` (default `86400`)
+   - `BILI_QQ` / `BILI_WECHAT` (optional contact info for `/api/bili-experiment/draft`)
+   - `BILIBILI_COOKIE` (required for real `/api/bili-experiment/send` dispatch)
+   - `BILI_SEND_ENABLED` (default `1`)
+   - `BILI_SEND_CONFIRM_TTL_SEC` (default `300`)
    - `ZHIHU_CLIENT_ID`
    - `ZHIHU_CLIENT_SECRET`
 6. Deploy and note the backend public URL.
@@ -43,6 +49,27 @@ If you do want a separate dev database, create a new Supabase project and use it
    - Open the Render Shell
    - Run: `npm run admin:create:prod`
    - If you want to reset admin password later, set `ADMIN_FORCE_RESET=true` and run again.
+
+### 3.1) Render Cron Job (daily 20:00 China time)
+Use a separate Render Cron Job service to run sync once per day.
+
+- Schedule: `0 12 * * *` (UTC) = Beijing `20:00`.
+- Root directory: `backend`
+- Build command: `npm install && npx prisma generate && npm run build`
+- Start command: `npm run sync:run:prod`
+- Required env vars:
+  - `DATABASE_URL`
+  - `DIRECT_URL`
+  - `SYNC_PLATFORMS` (default: `bilibili,zhihu`)
+  - `SYNC_KEYWORDS` (comma-separated keywords)
+  - `SYNC_PER_KEYWORD` (default: `40`)
+  - `SYNC_INPUT_JSON` (collector output json path, default example: `../tools/collector/output.json`)
+
+Dry-run in Render Shell before enabling cron:
+- `npm run build`
+- `npm run sync:run:prod`
+
+After run, verify logs in table `CrawlLog` (status/reason/item_count).
 
 ## 4) Vercel (frontend)
 1. Import the repo as a Vercel project.
