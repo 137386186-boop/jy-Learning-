@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Button, Card, Divider, Form, Input, message, Space, Spin, Tabs, Typography, Alert, Radio, Upload } from 'antd';
 import { AdminOauthContent } from './AdminOauth';
 import { adminFetch, clearAdminToken, getAdminToken, setAdminToken } from '../api/admin';
@@ -472,10 +473,16 @@ function DataQualityPanel() {
 }
 
 export default function Admin() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [admin, setAdmin] = useState<AdminUser | null>(null);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [checking, setChecking] = useState(true);
   const [loggingIn, setLoggingIn] = useState(false);
+  const validTabs = ['oauth', 'import', 'quality'] as const;
+  const tabFromQuery = searchParams.get('tab');
+  const activeTab = tabFromQuery && validTabs.includes(tabFromQuery as (typeof validTabs)[number])
+    ? tabFromQuery
+    : 'oauth';
 
   useEffect(() => {
     const token = getAdminToken();
@@ -530,6 +537,14 @@ export default function Admin() {
       })
       .catch(() => setStats(null));
   }, [admin]);
+
+  useEffect(() => {
+    if (!tabFromQuery) return;
+    if (validTabs.includes(tabFromQuery as (typeof validTabs)[number])) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('tab');
+    setSearchParams(next, { replace: true, preventScrollReset: true });
+  }, [tabFromQuery, searchParams, setSearchParams]);
 
   if (checking) {
     return (
@@ -594,26 +609,37 @@ export default function Admin() {
         </div>
       )}
       <Divider />
-      <Tabs
-        className="admin-tabs"
-        items={[
-          {
-            key: 'oauth',
-            label: '平台授权',
-            children: <AdminOauthContent />,
-          },
-          {
-            key: 'import',
-            label: '内容导入',
-            children: <ImportPanel />,
-          },
-          {
-            key: 'quality',
-            label: '数据质量',
-            children: <DataQualityPanel />,
-          },
-        ]}
-      />
+      <div className="admin-tab-shell">
+        <Tabs
+          className="admin-tabs"
+          activeKey={activeTab}
+          animated={false}
+          destroyInactiveTabPane={false}
+          onChange={(tab) => {
+            const next = new URLSearchParams(searchParams);
+            if (tab === 'oauth') next.delete('tab');
+            else next.set('tab', tab);
+            setSearchParams(next, { replace: true, preventScrollReset: true });
+          }}
+          items={[
+            {
+              key: 'oauth',
+              label: '平台授权',
+              children: <AdminOauthContent />,
+            },
+            {
+              key: 'import',
+              label: '内容导入',
+              children: <ImportPanel />,
+            },
+            {
+              key: 'quality',
+              label: '数据质量',
+              children: <DataQualityPanel />,
+            },
+          ]}
+        />
+      </div>
     </div>
   );
 }

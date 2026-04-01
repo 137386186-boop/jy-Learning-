@@ -17,9 +17,27 @@ function safeAppendHash(url: URL, hash: string): string {
   return url.toString();
 }
 
+function isTemplateOrPlaceholderUrl(sourceUrl: string): boolean {
+  const lower = sourceUrl.toLowerCase();
+  return (
+    lower.includes('example.com') ||
+    lower.includes('localhost') ||
+    lower.includes('/demo/') ||
+    lower.includes('demo-') ||
+    lower.includes('replace_me') ||
+    lower.includes('your-url') ||
+    sourceUrl.includes('{id}') ||
+    sourceUrl.includes('<id>') ||
+    sourceUrl.includes('{{')
+  );
+}
+
 export function resolveSourceLink(input: SourceLinkInput): ResolvedLink | null {
   const { sourceUrl, platformSlug, contentType, platformContentId } = input;
   if (!sourceUrl) return null;
+  if (isTemplateOrPlaceholderUrl(sourceUrl)) {
+    return { url: sourceUrl, auto: false, reason: '占位/示例链接，不可直达原文' };
+  }
   const isNumericId = (value?: string | null) => !!value && /^[0-9]+$/.test(value);
   try {
     const url = new URL(sourceUrl);

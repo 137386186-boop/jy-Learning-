@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Card, Button, Space, Typography, message, App, Alert, Tag } from 'antd';
+import { useEffect, useMemo, useState } from 'react';
+import { Card, Button, Typography, message, App, Alert, Tag, Row, Col } from 'antd';
 import { Link } from 'react-router-dom';
 import { adminFetch, getAdminToken } from '../api/admin';
 import { API_BASE } from '../api/base';
@@ -12,7 +12,10 @@ interface PlatformAuth {
   slug: string;
   enabled: boolean;
   oauthSupported: boolean;
+  oauthConfigured?: boolean;
+  oauthConfigError?: string | null;
   authStatus: string;
+  authState?: 'authed' | 'unauthed' | 'unsupported';
   authorizedAt: string | null;
 }
 
@@ -21,6 +24,11 @@ export function AdminOauthContent() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [platforms, setPlatforms] = useState<PlatformAuth[]>([]);
+  const platformGrid = useMemo(() => {
+    const supported = platforms.filter((p) => p.oauthSupported);
+    const unsupported = platforms.filter((p) => !p.oauthSupported);
+    return [...supported, ...unsupported];
+  }, [platforms]);
   const [loadingPlatforms, setLoadingPlatforms] = useState(false);
   const hasToken = !!getAdminToken();
 
@@ -29,7 +37,9 @@ export function AdminOauthContent() {
     if (params.get('zhihu') === 'ok') {
       setZhihuOk(true);
       message.success('知乎授权成功');
-      window.history.replaceState({}, '', '/admin/oauth');
+      params.delete('zhihu');
+      const q = params.toString();
+      window.history.replaceState({}, '', q ? `/admin?${q}` : '/admin');
     }
   }, []);
 
@@ -100,36 +110,56 @@ export function AdminOauthContent() {
       {loadingPlatforms && (
         <Paragraph type="secondary">正在加载平台列表…</Paragraph>
       )}
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        {platforms.map((p) => {
-          const authed = p.authStatus === 'authed';
+      <div className="admin-platform-grid">
+        <Row gutter={[16, 16]}>
+          {platformGrid.map((p) => {
+          const state = p.authState ?? (p.oauthSupported ? (p.authStatus === 'authed' ? 'authed' : 'unauthed') : 'unsupported');
+          const authed = state === 'authed';
+          const unsupported = state === 'unsupported';
+          const misconfigured = p.oauthSupported && p.slug === 'zhihu' && p.oauthConfigured !== true;
           return (
-            <Card
-              key={p.id}
-              title={p.name}
-              extra={authed ? <Tag color="green">已授权</Tag> : <Tag color="default">未授权</Tag>}
-              className="admin-card"
-            >
-              <p>平台标识：{p.slug}</p>
-              {p.oauthSupported ? (
-                <Button
-                  type="primary"
-                  onClick={p.slug === 'zhihu' ? goZhihuOAuth : undefined}
-                  loading={loading && p.slug === 'zhihu'}
-                  disabled={!hasToken}
-                >
-                  前往{p.name}授权
-                </Button>
-              ) : (
-                <Paragraph type="secondary">该平台暂不支持 OAuth 自动授权。</Paragraph>
-              )}
-            </Card>
+            <Col xs={24} md={12} xl={8} key={p.id}>
+              <Card
+                title={p.name}
+                extra={
+                  authed ? <Tag color="green">已授权</Tag>
+                    : unsupported ? <Tag color="default">暂不支持 OAuth</Tag>
+                      : misconfigured ? <Tag color="red">未配置</Tag>
+                        : <Tag color="orange">未授权</Tag>
+                }
+                className="admin-card"
+              >
+                <p>平台标识：{p.slug}</p>
+                {misconfigured && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message={p.oauthConfigError || '未配置 ZHIHU_CLIENT_ID / ZHIHU_CLIENT_SECRET'}
+                    style={{ marginBottom: 12 }}
+                  />
+                )}
+                {p.oauthSupported ? (
+                  <Button
+                    type="primary"
+                    onClick={p.slug === 'zhihu' ? goZhihuOAuth : undefined}
+                    loading={loading && p.slug === 'zhihu'}
+                    disabled={!hasToken || misconfigured}
+                    block
+                  >
+                    前往{p.name}授权
+                  </Button>
+                ) : (
+                  <Paragraph type="secondary">该平台暂不支持 OAuth 自动授权。</Paragraph>
+                )}
+              </Card>
+            </Col>
           );
-        })}
-        {!loadingPlatforms && platforms.length === 0 && (
-          <Paragraph type="secondary">暂无平台数据，请先导入内容或确认平台配置。</Paragraph>
-        )}
-      </Space>
+          })}
+        </Row>
+      </div>
+      {!loadingPlatforms && platforms.length === 0 && (
+        <Paragraph type="secondary">暂无平台数据，请先导入内容或确认平台配置。</Paragraph>
+      )}
       <div style={{ marginTop: 24 }}>
         <Link to="/">返回首页</Link>
       </div>
