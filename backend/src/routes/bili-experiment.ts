@@ -2,6 +2,7 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { randomUUID, createHash } from "crypto";
 import redis from "../lib/redis";
+import { prisma } from "../lib/prisma";
 import { requireAdmin } from "../lib/admin-auth";
 import { dispatchBiliReply } from "../lib/bilibili-dispatch";
 
@@ -84,6 +85,16 @@ function canSendContact(round: number, intentScore: number, userAskedContact: bo
   return round >= 3 && intentScore >= 0.75;
 }
 
+function extractBvidFromSourceUrl(sourceUrl: string): string | null {
+  try {
+    const url = new URL(sourceUrl);
+    const match = url.pathname.match(/\/video\/(BV[0-9A-Za-z]+)/i);
+    return match?.[1] ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 router.post("/draft", async (req, res) => {
   try {
     const body = req.body as DraftReq;
@@ -160,13 +171,33 @@ router.post("/send", requireAdmin, sendLimiter, async (req, res) => {
     const body = req.body as SendReq;
     const userId = (body.userId || "").trim();
     const replyText = (body.replyText || "").trim();
-    const oid = String(body.oid || body.targetId || "").trim();
+
+    const content = await prisma.content.findUnique({
+      where: { id: userId },
+      include: { platform: { select: { slug: true } } },
+    });
+
+    if (!content) {
+      return res.status(400).json({ ok: false, error: "userId 对应内容不存在" });
+    }
+
+    if (content.platform.slug !== "bilibili") {
+      return res.status(400).json({ ok: false, error: "仅支持 B 站内容发送" });
+    }
+
+    const sourceBvid = extractBvidFromSourceUrl(content.sourceUrl || "");
+    const oid = String(body.oid || sourceBvid || body.targetId || "").trim();
     const type = Number(body.type || 1);
-    const root = String(body.root || "").trim();
-    const parent = String(body.parent || "").trim();
+    const commentId = String(content.platformContentId || "").trim();
+    const root = String(body.root || commentId || "").trim();
+    const parent = String(body.parent || commentId || "").trim();
 
     if (!userId || !replyText || !oid) {
       return res.status(400).json({ ok: false, error: "userId/replyText/oid(或targetId) 必填" });
+    }
+
+    if (!root || !parent) {
+      return res.status(400).json({ ok: false, error: "无法确定 root/parent，请确认该 userId 对应 B 站评论已入库" });
     }
 
     const digest = payloadDigest({ userId, oid, replyText, type, root, parent });

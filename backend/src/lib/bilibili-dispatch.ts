@@ -6,6 +6,12 @@ type DispatchBiliReplyParams = {
   parent?: string;
 };
 
+type BiliViewByBvidResponse = {
+  code?: number;
+  message?: string;
+  data?: { aid?: number | string };
+};
+
 const BILI_API_BASE = 'https://api.bilibili.com';
 
 function getBilibiliCookieOrThrow(): string {
@@ -63,13 +69,55 @@ async function bilibiliApiPostForm<T = unknown>(
   return data as T;
 }
 
+async function bilibiliApiGetJson<T = unknown>(path: string): Promise<T> {
+  const cookie = getBilibiliCookieOrThrow();
+  const res = await fetch(`${BILI_API_BASE}${path}`, {
+    method: 'GET',
+    headers: {
+      ...buildBiliHeaders(cookie),
+      'Content-Type': 'application/json; charset=UTF-8',
+    },
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Bilibili API error: ${res.status} ${text}`);
+  }
+
+  const data = text ? JSON.parse(text) : {};
+  if (typeof data?.code === 'number' && data.code !== 0) {
+    throw new Error(`Bilibili API business error: ${data.code} ${data.message || ''}`.trim());
+  }
+
+  return data as T;
+}
+
+async function resolveAidFromBvidIfNeeded(inputOid: string): Promise<string> {
+  const oid = String(inputOid || '').trim();
+  if (/^[0-9]+$/.test(oid)) return oid;
+
+  const bvidMatch = oid.match(/^(BV[0-9A-Za-z]+)$/i);
+  if (!bvidMatch) return oid;
+
+  const bvid = bvidMatch[1];
+  const view = await bilibiliApiGetJson<BiliViewByBvidResponse>(
+    `/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`
+  );
+  const aid = view?.data?.aid;
+  if (!aid) {
+    throw new Error('Bilibili API business error: unable_to_resolve_aid_from_bvid');
+  }
+  return String(aid);
+}
+
 export async function dispatchBiliReply(params: DispatchBiliReplyParams): Promise<{ rpid?: string }> {
   const cookie = getBilibiliCookieOrThrow();
   const csrf = extractBiliCsrf(cookie);
   const type = Number(params.type || 1);
+  const oid = await resolveAidFromBvidIfNeeded(params.oid);
 
   const form = new URLSearchParams();
-  form.set('oid', String(params.oid));
+  form.set('oid', oid);
   form.set('type', String(type));
   form.set('message', params.message);
   form.set('csrf', csrf);
