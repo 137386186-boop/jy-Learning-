@@ -9,9 +9,17 @@ type DispatchBiliReplyParams = {
 const BILI_API_BASE = 'https://api.bilibili.com';
 
 function getBilibiliCookieOrThrow(): string {
-  const cookie = (process.env.BILIBILI_COOKIE || '').trim();
-  if (!cookie) throw new Error('BILIBILI_COOKIE not configured');
-  return cookie;
+  const raw = process.env.BILIBILI_COOKIE || '';
+  const normalized = raw
+    .replace(/[\r\n\t]+/g, '')
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('; ')
+    .trim();
+
+  if (!normalized) throw new Error('BILIBILI_COOKIE not configured');
+  return normalized;
 }
 
 function extractBiliCsrf(cookie: string): string {
