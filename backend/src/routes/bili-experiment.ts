@@ -51,8 +51,8 @@ function payloadDigest(input: {
   oid: string;
   replyText: string;
   type: number;
-  root: string;
-  parent: string;
+  root?: string;
+  parent?: string;
 }) {
   return createHash("sha256")
     .update(JSON.stringify(input))
@@ -93,6 +93,10 @@ function extractBvidFromSourceUrl(sourceUrl: string): string | null {
   } catch {
     return null;
   }
+}
+
+function isDigits(input: string): boolean {
+  return /^[0-9]+$/.test(input);
 }
 
 router.post("/draft", async (req, res) => {
@@ -185,6 +189,10 @@ router.post("/send", requireAdmin, sendLimiter, async (req, res) => {
       return res.status(400).json({ ok: false, error: "仅支持 B 站内容发送" });
     }
 
+    if (content.contentType !== "comment") {
+      return res.status(400).json({ ok: false, error: "仅支持 comment 类型 userId 发送，请传入评论内容 ID" });
+    }
+
     const sourceBvid = extractBvidFromSourceUrl(content.sourceUrl || "");
     const oid = String(body.oid || sourceBvid || body.targetId || "").trim();
     const type = Number(body.type || 1);
@@ -198,6 +206,10 @@ router.post("/send", requireAdmin, sendLimiter, async (req, res) => {
 
     if (!root || !parent) {
       return res.status(400).json({ ok: false, error: "无法确定 root/parent，请确认该 userId 对应 B 站评论已入库" });
+    }
+
+    if (!isDigits(root) || !isDigits(parent)) {
+      return res.status(400).json({ ok: false, error: "root/parent 必须为评论 rpid 数字 ID" });
     }
 
     const digest = payloadDigest({ userId, oid, replyText, type, root, parent });
