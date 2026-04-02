@@ -121,6 +121,8 @@ export async function dispatchBiliReply(params: DispatchBiliReplyParams): Promis
   form.set('type', String(type));
   form.set('message', params.message);
   form.set('csrf', csrf);
+  form.set('csrf_token', csrf);
+  form.set('plat', '1');
 
   if (params.root) form.set('root', String(params.root));
   if (params.parent) form.set('parent', String(params.parent));
