@@ -75,7 +75,7 @@ After run, verify logs in table `CrawlLog` (status/reason/item_count).
 1. Import the repo as a Vercel project.
 2. Root directory: `frontend`
 3. Add environment variable:
-   - `VITE_API_BASE` = backend public URL + `/api` (e.g. `https://jylearning.onrender.com/api`)
+   - `VITE_API_BASE` = backend public URL + `/api` (recommend custom API domain, e.g. `https://api.jylearning.com/api`)
 4. Build & deploy.
 
 ## 5) DNS & domain
