@@ -42,6 +42,12 @@ services:
         value: ""
       - key: BILI_SEND_ENABLED
         value: "1"
+      - key: BILI_SEND_MODE
+        value: "browser"
+      - key: BILI_BROWSER_REUSE
+        value: "1"
+      - key: BILI_BROWSER_TIMEOUT_MS
+        value: "15000"
       - key: BILI_SEND_CONFIRM_TTL_SEC
         value: "300"
 

@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
 type DispatchBiliReplyParams = {
   oid: string;
@@ -25,7 +26,14 @@ type BiliNavResponse = {
   };
 };
 
+type BrowserFetchResult = {
+  ok: boolean;
+  status: number;
+  text: string;
+};
+
 const BILI_API_BASE = 'https://api.bilibili.com';
+const BILI_SEND_MODE = (process.env.BILI_SEND_MODE || 'browser').toLowerCase();
 
 const WBI_MIXIN_KEY_ENC_TAB = [
   46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
@@ -33,6 +41,9 @@ const WBI_MIXIN_KEY_ENC_TAB = [
   37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
   22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 ];
+
+let browserSession: { browser: Browser; context: BrowserContext; page: Page } | null = null;
+let browserSessionPromise: Promise<{ browser: Browser; context: BrowserContext; page: Page }> | null = null;
 
 function getBilibiliCookieOrThrow(): string {
   const raw = process.env.BILIBILI_COOKIE || '';
@@ -150,6 +161,93 @@ async function getWbiSignedFormFields(baseFields: Record<string, string>): Promi
   return { w_rid: wRid, wts };
 }
 
+function parseCookieHeaderToContextCookies(cookieHeader: string) {
+  return cookieHeader
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const idx = part.indexOf('=');
+      if (idx <= 0) return null;
+      const name = part.slice(0, idx).trim();
+      const value = part.slice(idx + 1).trim();
+      if (!name) return null;
+      return {
+        name,
+        value,
+        domain: '.bilibili.com',
+        path: '/',
+        secure: true,
+      };
+    })
+    .filter(Boolean) as Array<{ name: string; value: string; domain: string; path: string; secure: boolean }>;
+}
+
+function getBrowserTimeoutMs(): number {
+  const parsed = Number(process.env.BILI_BROWSER_TIMEOUT_MS || 15000);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15000;
+}
+
+function shouldReuseBrowser(): boolean {
+  return (process.env.BILI_BROWSER_REUSE || '1') !== '0';
+}
+
+async function createBrowserSession() {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  });
+  const page = await context.newPage();
+  await page.goto('https://www.bilibili.com/', { waitUntil: 'domcontentloaded' });
+  return { browser, context, page };
+}
+
+async function closeReusableBrowserSession() {
+  if (!browserSession) return;
+  const current = browserSession;
+  browserSession = null;
+  await current.context.close().catch(() => {});
+  await current.browser.close().catch(() => {});
+}
+
+async function getReusableBrowserSession() {
+  if (browserSession) return browserSession;
+  if (!browserSessionPromise) {
+    browserSessionPromise = createBrowserSession()
+      .then((session) => {
+        browserSession = session;
+        return session;
+      })
+      .finally(() => {
+        browserSessionPromise = null;
+      });
+  }
+  return browserSessionPromise;
+}
+
+async function withBrowserPage<T>(cookie: string, run: (page: Page) => Promise<T>): Promise<T> {
+  if (shouldReuseBrowser()) {
+    const session = await getReusableBrowserSession();
+    await session.context.clearCookies();
+    await session.context.addCookies(parseCookieHeaderToContextCookies(cookie));
+    return run(session.page);
+  }
+
+  const session = await createBrowserSession();
+  try {
+    await session.context.clearCookies();
+    await session.context.addCookies(parseCookieHeaderToContextCookies(cookie));
+    return await run(session.page);
+  } finally {
+    await session.context.close().catch(() => {});
+    await session.browser.close().catch(() => {});
+  }
+}
+
 async function resolveAidFromBvidIfNeeded(inputOid: string): Promise<string> {
   const oid = String(inputOid || '').trim();
   if (/^[0-9]+$/.test(oid)) return oid;
@@ -168,23 +266,18 @@ async function resolveAidFromBvidIfNeeded(inputOid: string): Promise<string> {
   return String(aid);
 }
 
-export async function dispatchBiliReply(params: DispatchBiliReplyParams): Promise<{ rpid?: string }> {
-  const cookie = getBilibiliCookieOrThrow();
-  const csrf = extractBiliCsrf(cookie);
-  const type = Number(params.type || 1);
-  const oid = await resolveAidFromBvidIfNeeded(params.oid);
-
-  const baseFields: Record<string, string> = {
-    csrf,
-    csrf_token: csrf,
+function buildReplyFormFields(input: { csrf: string; message: string; oid: string; parent?: string; root?: string; type: number }) {
+  return {
+    csrf: input.csrf,
+    csrf_token: input.csrf,
     gaia_source: 'main_web',
-    message: params.message,
-    oid,
-    parent: params.parent ? String(params.parent) : '0',
+    message: input.message,
+    oid: input.oid,
+    parent: input.parent ? String(input.parent) : '0',
     plat: '1',
-    root: params.root ? String(params.root) : '0',
+    root: input.root ? String(input.root) : '0',
     statistics: '{"appId":1,"platform":3,"version":""}',
-    type: String(type),
+    type: String(input.type),
     at_name_to_mid: '{}',
     b_wet: '7',
     dm_cover_img_str: '',
@@ -192,19 +285,105 @@ export async function dispatchBiliReply(params: DispatchBiliReplyParams): Promis
     dm_img_list: '[]',
     dm_img_str: '',
   };
+}
+
+function parseReplyResult(text: string): { rpid?: string } {
+  const data = text ? JSON.parse(text) : {};
+  if (typeof data?.code === 'number' && data.code !== 0) {
+    throw new Error(`Bilibili API business error: ${data.code} ${data.message || ''}`.trim());
+  }
+  const rpid = data?.data?.rpid_str || (data?.data?.rpid ? String(data.data.rpid) : undefined);
+  return { rpid };
+}
+
+async function dispatchViaHttp(params: DispatchBiliReplyParams): Promise<{ rpid?: string }> {
+  const cookie = getBilibiliCookieOrThrow();
+  const csrf = extractBiliCsrf(cookie);
+  const type = Number(params.type || 1);
+  const oid = await resolveAidFromBvidIfNeeded(params.oid);
+  const baseFields = buildReplyFormFields({
+    csrf,
+    message: params.message,
+    oid,
+    parent: params.parent,
+    root: params.root,
+    type,
+  });
 
   const { w_rid, wts } = await getWbiSignedFormFields(baseFields);
-
   const form = new URLSearchParams();
-  Object.entries({ ...baseFields, w_rid, wts }).forEach(([k, v]) => {
-    form.set(k, v);
-  });
+  Object.entries({ ...baseFields, w_rid, wts }).forEach(([k, v]) => form.set(k, v));
 
   const data = await bilibiliApiPostForm<{ data?: { rpid_str?: string; rpid?: number | string } }>(
     '/x/v2/reply/add',
     form
   );
-
   const rpid = data?.data?.rpid_str || (data?.data?.rpid ? String(data.data.rpid) : undefined);
   return { rpid };
+}
+
+async function dispatchViaBrowserContext(params: DispatchBiliReplyParams): Promise<{ rpid?: string }> {
+  const cookie = getBilibiliCookieOrThrow();
+  const csrf = extractBiliCsrf(cookie);
+  const type = Number(params.type || 1);
+  const oid = await resolveAidFromBvidIfNeeded(params.oid);
+  const baseFields = buildReplyFormFields({
+    csrf,
+    message: params.message,
+    oid,
+    parent: params.parent,
+    root: params.root,
+    type,
+  });
+
+  const { w_rid, wts } = await getWbiSignedFormFields(baseFields);
+  const formBody = new URLSearchParams({ ...baseFields, w_rid, wts }).toString();
+  const timeoutMs = getBrowserTimeoutMs();
+
+  const runOnce = async () => {
+    const result = await withBrowserPage(cookie, async (page) => {
+      return page.evaluate(
+        async ({ body, timeout }) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeout);
+          try {
+            const res = await fetch('https://api.bilibili.com/x/v2/reply/add', {
+              method: 'POST',
+              credentials: 'include',
+              headers: {
+                'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              },
+              body,
+              signal: controller.signal,
+            });
+            const text = await res.text();
+            return { ok: res.ok, status: res.status, text } as BrowserFetchResult;
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+        { body: formBody, timeout: timeoutMs }
+      );
+    });
+
+    if (!result.ok) {
+      throw new Error(`Bilibili API error: ${result.status} ${result.text}`);
+    }
+
+    return parseReplyResult(result.text);
+  };
+
+  try {
+    return await runOnce();
+  } catch (error) {
+    await closeReusableBrowserSession();
+    return runOnce();
+  }
+}
+
+export async function dispatchBiliReply(params: DispatchBiliReplyParams): Promise<{ rpid?: string }> {
+  if (BILI_SEND_MODE === 'http') {
+    return dispatchViaHttp(params);
+  }
+  return dispatchViaBrowserContext(params);
 }
