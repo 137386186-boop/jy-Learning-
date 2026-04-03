@@ -1,4 +1,4 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+export const API_BASE = import.meta.env.VITE_API_BASE || 'https://jy-learning.onrender.com/api';
 
 export const getHealthUrl = (): string => {
   if (API_BASE.startsWith('http')) {
