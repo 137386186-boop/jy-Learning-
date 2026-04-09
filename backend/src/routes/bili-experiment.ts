@@ -189,27 +189,33 @@ router.post("/send", requireAdmin, sendLimiter, async (req, res) => {
       return res.status(400).json({ ok: false, error: "仅支持 B 站内容发送" });
     }
 
-    if (content.contentType !== "comment") {
-      return res.status(400).json({ ok: false, error: "仅支持 comment 类型 userId 发送，请传入评论内容 ID" });
+    if (content.contentType !== "comment" && content.contentType !== "post") {
+      return res.status(400).json({ ok: false, error: "仅支持 comment/post 类型 userId 发送" });
     }
 
     const sourceBvid = extractBvidFromSourceUrl(content.sourceUrl || "");
     const oid = String(body.oid || sourceBvid || body.targetId || "").trim();
     const type = Number(body.type || 1);
-    const commentId = String(content.platformContentId || "").trim();
-    const root = String(body.root || commentId || "").trim();
-    const parent = String(body.parent || commentId || "").trim();
 
-    if (!userId || !replyText || !oid) {
-      return res.status(400).json({ ok: false, error: "userId/replyText/oid(或targetId) 必填" });
+    if (!userId || !replyText) {
+      return res.status(400).json({ ok: false, error: "userId/replyText 必填" });
     }
 
-    if (!root || !parent) {
+    if (!oid) {
+      return res.status(400).json({ ok: false, error: "无法确定 oid(或targetId)，请补全帖子链接中的 BV 号或显式传入 targetId" });
+    }
+
+    const commentId = String(content.platformContentId || "").trim();
+    const isComment = content.contentType === "comment";
+    const root = isComment ? String(body.root || commentId || "").trim() : "0";
+    const parent = isComment ? String(body.parent || commentId || "").trim() : "0";
+
+    if (isComment && (!root || !parent)) {
       return res.status(400).json({ ok: false, error: "无法确定 root/parent，请确认该 userId 对应 B 站评论已入库" });
     }
 
     if (!isDigits(root) || !isDigits(parent)) {
-      return res.status(400).json({ ok: false, error: "root/parent 必须为评论 rpid 数字 ID" });
+      return res.status(400).json({ ok: false, error: "root/parent 必须为评论 rpid 数字 ID（帖子新增评论请保持为 0）" });
     }
 
     const digest = payloadDigest({ userId, oid, replyText, type, root, parent });

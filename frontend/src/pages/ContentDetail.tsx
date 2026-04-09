@@ -117,23 +117,24 @@ export default function ContentDetail() {
       message.warning('请先在管理后台登录');
       return;
     }
+    const isBilibiliContent = detail?.platform?.slug === 'bilibili' && (detail?.contentType === 'comment' || detail?.contentType === 'post');
     const isBilibiliComment = detail?.platform?.slug === 'bilibili' && detail?.contentType === 'comment';
+    const isBilibiliPost = detail?.platform?.slug === 'bilibili' && detail?.contentType === 'post';
     const canOauthReply = platformAuth?.oauthSupported && platformAuth?.authStatus === 'authed';
-    if (!isBilibiliComment && !canOauthReply) {
+    if (!isBilibiliContent && !canOauthReply) {
       message.warning('当前平台未完成授权或暂不支持自动回复');
       return;
     }
     setReplyLoading(true);
-    setReplyStatusText(isBilibiliComment ? '正在提交发送请求…' : '正在发送回复…');
+    setReplyStatusText(isBilibiliContent ? '正在提交发送请求…' : '正在发送回复…');
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       headers.Authorization = `Bearer ${token}`;
 
-      if (isBilibiliComment) {
+      if (isBilibiliContent) {
         const payload: Record<string, unknown> = {
           userId: id,
           replyText: replyText.trim(),
-          contentType: 'comment',
         };
         if (detail?.platformContentId && /^BV[0-9A-Za-z]+$/.test(detail.platformContentId)) {
           payload.targetId = detail.platformContentId;
@@ -335,9 +336,9 @@ export default function ContentDetail() {
           <Typography.Paragraph type="secondary">
             当前回复方式：
             {isBilibiliComment
-              ? 'B站实验发送（含二次确认）'
+              ? 'B站评论回复（含二次确认）'
               : isBilibiliPost
-                ? 'B站帖子暂不支持回复'
+                ? 'B站帖子新增评论（含二次确认）'
                 : `${detail.platform?.name} OAuth 自动回复`}
           </Typography.Paragraph>
           {replyLoading && replyStatusText && (
@@ -368,7 +369,7 @@ export default function ContentDetail() {
           {getAdminToken() && isBilibiliPost && (
             <Alert
               type="info"
-              message="B站目前仅支持评论回复，帖子暂不支持回复"
+              message="B站帖子将通过实验发送链路新增评论，并自动执行二次确认"
               showIcon
               style={{ marginBottom: 12 }}
             />
@@ -404,7 +405,6 @@ export default function ContentDetail() {
             disabled={
               !getAdminToken() ||
               !replyText.trim() ||
-              isBilibiliPost ||
               (!isBilibiliComment && !isBilibiliPost && (!platformAuth || !platformAuth.oauthSupported || platformAuth.authStatus !== 'authed'))
             }
           >
