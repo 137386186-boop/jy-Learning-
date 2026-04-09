@@ -213,6 +213,7 @@ export default function ContentDetail() {
 
   const isComment = detail.contentType === 'comment';
   const isBilibiliComment = detail.platform?.slug === 'bilibili' && detail.contentType === 'comment';
+  const isBilibiliPost = detail.platform?.slug === 'bilibili' && detail.contentType === 'post';
   const commentId = detail.platformContentId || '';
   const resolved = resolveSourceLink({
     sourceUrl: detail.sourceUrl,
@@ -329,7 +330,11 @@ export default function ContentDetail() {
         <Card title="快速回复" style={{ marginTop: 16 }} className="detail-card">
           <Typography.Paragraph type="secondary">
             当前回复方式：
-            {isBilibiliComment ? 'B站实验发送（含二次确认）' : `${detail.platform?.name} OAuth 自动回复`}
+            {isBilibiliComment
+              ? 'B站实验发送（含二次确认）'
+              : isBilibiliPost
+                ? 'B站帖子暂不支持回复'
+                : `${detail.platform?.name} OAuth 自动回复`}
           </Typography.Paragraph>
           {!getAdminToken() && (
             <Alert
@@ -348,7 +353,15 @@ export default function ContentDetail() {
               style={{ marginBottom: 12 }}
             />
           )}
-          {getAdminToken() && !isBilibiliComment && platformAuth && !platformAuth.oauthSupported && (
+          {getAdminToken() && isBilibiliPost && (
+            <Alert
+              type="info"
+              message="B站目前仅支持评论回复，帖子暂不支持回复"
+              showIcon
+              style={{ marginBottom: 12 }}
+            />
+          )}
+          {getAdminToken() && !isBilibiliComment && !isBilibiliPost && platformAuth && !platformAuth.oauthSupported && (
             <Alert
               type="info"
               message={`该平台暂不支持 OAuth 自动回复（${detail.platform?.name}）`}
@@ -356,7 +369,7 @@ export default function ContentDetail() {
               style={{ marginBottom: 12 }}
             />
           )}
-          {getAdminToken() && !isBilibiliComment && platformAuth?.oauthSupported && platformAuth.authStatus !== 'authed' && (
+          {getAdminToken() && !isBilibiliComment && !isBilibiliPost && platformAuth?.oauthSupported && platformAuth.authStatus !== 'authed' && (
             <Alert
               type="warning"
               message={`尚未完成 ${detail.platform?.name} 授权，无法自动回复`}
@@ -379,7 +392,8 @@ export default function ContentDetail() {
             disabled={
               !getAdminToken() ||
               !replyText.trim() ||
-              (!isBilibiliComment && (!platformAuth || !platformAuth.oauthSupported || platformAuth.authStatus !== 'authed'))
+              isBilibiliPost ||
+              (!isBilibiliComment && !isBilibiliPost && (!platformAuth || !platformAuth.oauthSupported || platformAuth.authStatus !== 'authed'))
             }
           >
             发送回复
