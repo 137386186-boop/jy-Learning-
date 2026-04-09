@@ -268,8 +268,6 @@ export default function ContentList() {
       })
       .catch((e) => {
         if (e?.name === 'AbortError') return;
-        setList([]);
-        setTotal(0);
         setHasLoadedOnce(true);
         setLoadError(e instanceof Error ? e.message : '加载失败，请稍后重试');
       })

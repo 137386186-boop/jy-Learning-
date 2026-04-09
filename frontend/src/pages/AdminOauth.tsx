@@ -123,7 +123,7 @@ export function AdminOauthContent() {
                 title={p.name}
                 extra={
                   authed ? <Tag color="green">已授权</Tag>
-                    : unsupported ? <Tag color="default">暂不支持 OAuth</Tag>
+                    : unsupported ? <Tag color="default">OAuth未接入</Tag>
                       : misconfigured ? <Tag color="red">未配置</Tag>
                         : <Tag color="orange">未授权</Tag>
                 }
@@ -149,7 +149,11 @@ export function AdminOauthContent() {
                     前往{p.name}授权
                   </Button>
                 ) : (
-                  <Paragraph type="secondary">该平台暂不支持 OAuth 自动授权。</Paragraph>
+                  <Paragraph type="secondary">
+                    {p.slug === 'bilibili'
+                      ? 'B站可用实验发送（需二次确认），当前仅未接入 OAuth 授权。'
+                      : '该平台暂不支持 OAuth 自动授权。'}
+                  </Paragraph>
                 )}
               </Card>
             </Col>

@@ -8,6 +8,7 @@ import { resolveSourceLink } from '../utils/links';
 
 const API = `${API_BASE}/contents`;
 const REPLY_API = `${API_BASE}/reply`;
+const BILI_EXPERIMENT_API = `${API_BASE}/bili-experiment/send`;
 
 interface ContentDetailType {
   id: string;
@@ -106,8 +107,6 @@ export default function ContentDetail() {
   };
 
   const sendReply = async () => {
-    const canReply =
-      platformAuth?.oauthSupported && platformAuth?.authStatus === 'authed';
     if (!id || !replyText.trim()) {
       message.warning('请输入回复内容');
       return;
@@ -117,7 +116,9 @@ export default function ContentDetail() {
       message.warning('请先在管理后台登录');
       return;
     }
-    if (!canReply) {
+    const isBilibiliComment = detail?.platform?.slug === 'bilibili' && detail?.contentType === 'comment';
+    const canOauthReply = platformAuth?.oauthSupported && platformAuth?.authStatus === 'authed';
+    if (!isBilibiliComment && !canOauthReply) {
       message.warning('当前平台未完成授权或暂不支持自动回复');
       return;
     }
@@ -125,6 +126,56 @@ export default function ContentDetail() {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       headers.Authorization = `Bearer ${token}`;
+
+      if (isBilibiliComment) {
+        const payload: Record<string, unknown> = {
+          userId: id,
+          replyText: replyText.trim(),
+          contentType: 'comment',
+        };
+        if (detail?.platformContentId && /^BV[0-9A-Za-z]+$/.test(detail.platformContentId)) {
+          payload.targetId = detail.platformContentId;
+        }
+
+        const firstRes = await fetch(BILI_EXPERIMENT_API, {
+          method: 'POST',
+          headers,
+          credentials: 'include',
+          body: JSON.stringify(payload),
+        });
+        const firstData = await firstRes.json();
+        if (!firstRes.ok) {
+          message.error(firstData.error || firstData.detail || '发送失败');
+          return;
+        }
+
+        if (firstData?.error === 'manual_confirmation_required' && firstData.confirmToken) {
+          const confirmRes = await fetch(BILI_EXPERIMENT_API, {
+            method: 'POST',
+            headers,
+            credentials: 'include',
+            body: JSON.stringify({
+              ...payload,
+              confirm: true,
+              confirmToken: firstData.confirmToken,
+            }),
+          });
+          const confirmData = await confirmRes.json();
+          if (!confirmRes.ok || !confirmData?.ok) {
+            message.error(confirmData.error || confirmData.detail || '发送失败');
+            return;
+          }
+        } else if (!firstData?.ok) {
+          message.error(firstData.error || firstData.detail || '发送失败');
+          return;
+        }
+
+        message.success('回复已发送');
+        setReplyText('');
+        setDetail((d) => (d ? { ...d, replied: true, repliedAt: new Date().toISOString() } : null));
+        return;
+      }
+
       const res = await fetch(REPLY_API, {
         method: 'POST',
         headers,
@@ -165,6 +216,7 @@ export default function ContentDetail() {
   }
 
   const isComment = detail.contentType === 'comment';
+  const isBilibiliComment = detail.platform?.slug === 'bilibili' && detail.contentType === 'comment';
   const commentId = detail.platformContentId || '';
   const resolved = resolveSourceLink({
     sourceUrl: detail.sourceUrl,
@@ -280,7 +332,8 @@ export default function ContentDetail() {
 
         <Card title="快速回复" style={{ marginTop: 16 }} className="detail-card">
           <Typography.Paragraph type="secondary">
-            将以 {detail.platform?.name} 的授权账号身份回复该内容。
+            当前回复方式：
+            {isBilibiliComment ? 'B站实验发送（含二次确认）' : `${detail.platform?.name} OAuth 自动回复`}
           </Typography.Paragraph>
           {!getAdminToken() && (
             <Alert
@@ -291,15 +344,23 @@ export default function ContentDetail() {
               action={<Link to="/admin">去登录</Link>}
             />
           )}
-          {getAdminToken() && platformAuth && !platformAuth.oauthSupported && (
+          {getAdminToken() && isBilibiliComment && (
             <Alert
               type="info"
-              message={`该平台暂不支持自动回复（${detail.platform?.name}）`}
+              message="B站评论将通过实验发送链路提交，并自动执行二次确认"
               showIcon
               style={{ marginBottom: 12 }}
             />
           )}
-          {getAdminToken() && platformAuth?.oauthSupported && platformAuth.authStatus !== 'authed' && (
+          {getAdminToken() && !isBilibiliComment && platformAuth && !platformAuth.oauthSupported && (
+            <Alert
+              type="info"
+              message={`该平台暂不支持 OAuth 自动回复（${detail.platform?.name}）`}
+              showIcon
+              style={{ marginBottom: 12 }}
+            />
+          )}
+          {getAdminToken() && !isBilibiliComment && platformAuth?.oauthSupported && platformAuth.authStatus !== 'authed' && (
             <Alert
               type="warning"
               message={`尚未完成 ${detail.platform?.name} 授权，无法自动回复`}
@@ -319,7 +380,11 @@ export default function ContentDetail() {
             type="primary"
             onClick={sendReply}
             loading={replyLoading}
-            disabled={!platformAuth || !platformAuth.oauthSupported || platformAuth.authStatus !== 'authed'}
+            disabled={
+              !getAdminToken() ||
+              !replyText.trim() ||
+              (!isBilibiliComment && (!platformAuth || !platformAuth.oauthSupported || platformAuth.authStatus !== 'authed'))
+            }
           >
             发送回复
           </Button>
