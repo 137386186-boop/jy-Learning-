@@ -118,8 +118,6 @@ export default function ContentDetail() {
       return;
     }
     const isBilibiliContent = detail?.platform?.slug === 'bilibili' && (detail?.contentType === 'comment' || detail?.contentType === 'post');
-    const isBilibiliComment = detail?.platform?.slug === 'bilibili' && detail?.contentType === 'comment';
-    const isBilibiliPost = detail?.platform?.slug === 'bilibili' && detail?.contentType === 'post';
     const canOauthReply = platformAuth?.oauthSupported && platformAuth?.authStatus === 'authed';
     if (!isBilibiliContent && !canOauthReply) {
       message.warning('当前平台未完成授权或暂不支持自动回复');
