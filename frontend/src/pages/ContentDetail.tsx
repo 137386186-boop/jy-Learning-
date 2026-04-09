@@ -144,10 +144,6 @@ export default function ContentDetail() {
           body: JSON.stringify(payload),
         });
         const firstData = await firstRes.json();
-        if (!firstRes.ok) {
-          message.error(firstData.error || firstData.detail || '发送失败');
-          return;
-        }
 
         if (firstData?.error === 'manual_confirmation_required' && firstData.confirmToken) {
           const confirmRes = await fetch(BILI_EXPERIMENT_API, {
@@ -165,7 +161,7 @@ export default function ContentDetail() {
             message.error(confirmData.error || confirmData.detail || '发送失败');
             return;
           }
-        } else if (!firstData?.ok) {
+        } else if (!firstRes.ok || !firstData?.ok) {
           message.error(firstData.error || firstData.detail || '发送失败');
           return;
         }
