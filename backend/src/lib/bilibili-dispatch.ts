@@ -184,8 +184,8 @@ function parseCookieHeaderToContextCookies(cookieHeader: string) {
 }
 
 function getBrowserTimeoutMs(): number {
-  const parsed = Number(process.env.BILI_BROWSER_TIMEOUT_MS || 15000);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15000;
+  const parsed = Number(process.env.BILI_BROWSER_TIMEOUT_MS || 8000);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 8000;
 }
 
 function shouldReuseBrowser(): boolean {
@@ -373,12 +373,7 @@ async function dispatchViaBrowserContext(params: DispatchBiliReplyParams): Promi
     return parseReplyResult(result.text);
   };
 
-  try {
-    return await runOnce();
-  } catch (error) {
-    await closeReusableBrowserSession();
-    return runOnce();
-  }
+  return runOnce();
 }
 
 export async function dispatchBiliReply(params: DispatchBiliReplyParams): Promise<{ rpid?: string }> {

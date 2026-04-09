@@ -58,6 +58,7 @@ export default function ContentDetail() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
   const [replyLoading, setReplyLoading] = useState(false);
+  const [replyStatusText, setReplyStatusText] = useState<string | null>(null);
   const [platformAuth, setPlatformAuth] = useState<PlatformAuthInfo | null>(null);
 
   useEffect(() => {
@@ -123,6 +124,7 @@ export default function ContentDetail() {
       return;
     }
     setReplyLoading(true);
+    setReplyStatusText(isBilibiliComment ? '正在提交发送请求…' : '正在发送回复…');
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       headers.Authorization = `Bearer ${token}`;
@@ -146,6 +148,7 @@ export default function ContentDetail() {
         const firstData = await firstRes.json();
 
         if (firstData?.error === 'manual_confirmation_required' && firstData.confirmToken) {
+          setReplyStatusText('需要二次确认，正在自动确认…');
           const confirmRes = await fetch(BILI_EXPERIMENT_API, {
             method: 'POST',
             headers,
@@ -190,6 +193,7 @@ export default function ContentDetail() {
       message.error(e instanceof Error ? e.message : '网络错误');
     } finally {
       setReplyLoading(false);
+      setReplyStatusText(null);
     }
   };
 
@@ -336,6 +340,14 @@ export default function ContentDetail() {
                 ? 'B站帖子暂不支持回复'
                 : `${detail.platform?.name} OAuth 自动回复`}
           </Typography.Paragraph>
+          {replyLoading && replyStatusText && (
+            <Alert
+              type="info"
+              message={replyStatusText}
+              showIcon
+              style={{ marginBottom: 12 }}
+            />
+          )}
           {!getAdminToken() && (
             <Alert
               type="warning"
