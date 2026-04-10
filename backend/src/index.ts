@@ -80,14 +80,14 @@ async function ensureAdminFromEnv() {
 }
 
 async function start() {
+  app.listen(PORT, () => {
+    console.log(`Backend listening on http://localhost:${PORT}`);
+  });
+
   try {
     await ensureAdminFromEnv();
-    app.listen(PORT, () => {
-      console.log(`Backend listening on http://localhost:${PORT}`);
-    });
   } catch (error) {
-    console.error('Backend startup failed:', error);
-    process.exit(1);
+    console.error('Admin bootstrap failed:', error);
   }
 }
 
