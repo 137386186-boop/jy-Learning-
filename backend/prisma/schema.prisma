@@ -13,6 +13,27 @@ enum ContentType {
   comment
 }
 
+enum LearningTaskStatus {
+  draft
+  active
+  archived
+}
+
+enum TaskProgressStatus {
+  not_started
+  in_progress
+  submitted
+  done
+}
+
+enum ArtifactType {
+  exercise
+  hint
+  summary
+  report
+  image
+}
+
 model Platform {
   id        String        @id @default(cuid())
   name      String
@@ -124,4 +145,105 @@ model Admin {
   passwordHash String   @map("password_hash")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
+}
+
+model AppParent {
+  id           String         @id @default(cuid())
+  username     String         @unique
+  passwordHash String         @map("password_hash")
+  displayName  String         @map("display_name")
+  children     AppChild[]
+  tasks        LearningTask[]
+  artifacts    AppArtifact[]
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  @@map("AppParent")
+}
+
+model AppChild {
+  id          String         @id @default(cuid())
+  parentId    String         @map("parent_id")
+  parent      AppParent      @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  name        String
+  avatarUrl   String?        @map("avatar_url")
+  birthDate   DateTime?      @map("birth_date")
+  gradeLevel  String?        @map("grade_level")
+  tasks       LearningTask[]
+  progresses  TaskProgress[]
+  artifacts   AppArtifact[]
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  @@index([parentId])
+  @@map("AppChild")
+}
+
+model LearningTask {
+  id          String             @id @default(cuid())
+  parentId    String             @map("parent_id")
+  parent      AppParent          @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  childId     String?            @map("child_id")
+  child       AppChild?          @relation(fields: [childId], references: [id], onDelete: SetNull)
+  title       String
+  description String?            @db.Text
+  category    String
+  difficulty  Int                @default(1)
+  source      String             @default("manual")
+  status      LearningTaskStatus @default(active)
+  dueDate     DateTime?          @map("due_date")
+  progresses  TaskProgress[]
+  artifacts   AppArtifact[]
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  @@index([parentId])
+  @@index([childId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([createdAt])
+  @@map("LearningTask")
+}
+
+model TaskProgress {
+  id          String             @id @default(cuid())
+  taskId       String            @map("task_id")
+  task         LearningTask      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  childId      String            @map("child_id")
+  child        AppChild          @relation(fields: [childId], references: [id], onDelete: Cascade)
+  status       TaskProgressStatus @default(not_started)
+  score        Int?
+  answerData   Json?             @map("answer_data")
+  submittedAt  DateTime?         @map("submitted_at")
+  completedAt  DateTime?         @map("completed_at")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  @@unique([taskId, childId])
+  @@index([childId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("TaskProgress")
+}
+
+model AppArtifact {
+  id          String       @id @default(cuid())
+  parentId    String       @map("parent_id")
+  parent      AppParent    @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  childId     String?      @map("child_id")
+  child       AppChild?    @relation(fields: [childId], references: [id], onDelete: SetNull)
+  taskId      String?      @map("task_id")
+  task        LearningTask? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  type        ArtifactType
+  content     Json
+  model       String?
+  promptVersion String?    @map("prompt_version")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  @@index([parentId])
+  @@index([childId])
+  @@index([taskId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("AppArtifact")
 }
