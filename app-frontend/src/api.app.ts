@@ -1,4 +1,4 @@
-import { API_BASE } from './base';
+import { APP_API_BASE } from './api.base';
 
 const APP_TOKEN_KEY = 'app_parent_token';
 
@@ -23,4 +23,4 @@ export async function appFetch(path: string, init: RequestInit = {}): Promise<Re
   return response;
 }
 
-export const APP_API_BASE = `${API_BASE}/app`;
+export { APP_API_BASE };

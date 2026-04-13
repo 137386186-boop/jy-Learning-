@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Alert, Card, List, Progress, Space, Statistic, Typography, message } from 'antd';
 import dayjs from 'dayjs';
-import { APP_API_BASE, appFetch } from '../api/app';
+import { APP_API_BASE, appFetch } from '../api.app';
 
 interface ReportTaskItem {
   id: string;
@@ -82,7 +82,7 @@ export default function AppReports() {
       <Card
         loading={loading}
         title={report ? `${report.child.name} 的学习报告` : '学习报告'}
-        extra={<Link to="/app">返回家长端</Link>}
+        extra={<Link to="/">返回家长端</Link>}
       >
         <Space size={24} wrap>
           <Statistic title="总任务数" value={report?.summary.total || 0} />

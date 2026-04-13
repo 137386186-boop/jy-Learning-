@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Alert, Button, Card, Form, Input, List, Select, Space, Typography, message } from 'antd';
 import dayjs from 'dayjs';
-import { APP_API_BASE, appFetch, clearAppToken, getAppToken, setAppToken } from '../api/app';
+import { APP_API_BASE, appFetch, clearAppToken, getAppToken, setAppToken } from '../api.app';
 
 interface ParentUser {
   id: string;
@@ -254,10 +254,10 @@ export default function AppLearning() {
         {selectedChild && (
           <Space direction="vertical" size={4}>
             <Typography.Paragraph style={{ marginBottom: 0 }}>
-              进入儿童端：<Link to={`/app/child/${selectedChild.id}/today`}>{selectedChild.name} 的今日任务</Link>
+              进入儿童端：<Link to={`/child/${selectedChild.id}/today`}>{selectedChild.name} 的今日任务</Link>
             </Typography.Paragraph>
             <Typography.Paragraph style={{ marginBottom: 0 }}>
-              查看报告：<Link to={`/app/reports/${selectedChild.id}`}>{selectedChild.name} 的学习报告</Link>
+              查看报告：<Link to={`/reports/${selectedChild.id}`}>{selectedChild.name} 的学习报告</Link>
             </Typography.Paragraph>
           </Space>
         )}

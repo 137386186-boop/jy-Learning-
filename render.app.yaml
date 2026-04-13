@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: jy-learning-app-web
+    env: static
+    rootDir: app-frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    pullRequestPreviewsEnabled: true
+    autoDeploy: true
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+  - type: web
+    name: jy-learning-app-api
+    env: node
+    plan: starter
+    rootDir: backend
+    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy && npm run build
+    startCommand: npm run start:app
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: APP_CORS_ORIGIN
+        value: "https://jy-learning-app.onrender.com"
+      - key: APP_TOKEN_TTL
+        value: "7d"

@@ -7,7 +7,9 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:app": "tsx watch src/index.app.ts",
     "start": "node dist/index.js",
+    "start:app": "node dist/index.app.js",
     "build": "tsc",
     "test": "vitest run",
     "admin:create": "tsx src/scripts/create-admin.ts",

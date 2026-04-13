@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
-const BASE_URL = (process.env.APP_ACCEPTANCE_BASE_URL || 'https://jy-learning.onrender.com').replace(/\/$/, '');
+const BASE_URL = (process.env.APP_ACCEPTANCE_BASE_URL || 'https://jy-learning-app-api.onrender.com').replace(/\/$/, '');
 
 async function requestJson(pathname: string, init: RequestInit = {}) {
   const url = `${BASE_URL}${pathname}`;
