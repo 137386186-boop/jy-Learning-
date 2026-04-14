@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Alert, Button, Card, Form, Input, List, Select, Space, Typography, message } from 'antd';
+import { Alert, Button, Card, Form, Input, List, Select, Space, Tabs, Typography, message } from 'antd';
 import dayjs from 'dayjs';
 import { APP_API_BASE, appFetch, clearAppToken, getAppToken, setAppToken } from '../api.app';
 
@@ -35,6 +35,8 @@ export default function AppLearning() {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedChildId, setSelectedChildId] = useState<string | undefined>(undefined);
+  const [authMode, setAuthMode] = useState<'register' | 'login'>('register');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
 
   const selectedChild = useMemo(
     () => children.find((c) => c.id === selectedChildId) || null,
@@ -68,36 +70,50 @@ export default function AppLearning() {
     if (token) reloadAll();
   }, [token]);
 
-  const onRegister = async (values: { username: string; password: string; displayName?: string }) => {
-    const res = await appFetch(`${APP_API_BASE}/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(values),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      message.error(data.error || '注册失败');
-      return;
+  const onRegister = async (values: { username: string; password: string }) => {
+    setAuthSubmitting(true);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || '注册失败');
+        return;
+      }
+      setAppToken(data.token);
+      setToken(data.token);
+      message.success('注册成功');
+    } catch {
+      message.error('网络异常，请稍后重试');
+    } finally {
+      setAuthSubmitting(false);
     }
-    setAppToken(data.token);
-    setToken(data.token);
-    message.success('注册成功');
   };
 
   const onLogin = async (values: { username: string; password: string }) => {
-    const res = await appFetch(`${APP_API_BASE}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(values),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      message.error(data.error || '登录失败');
-      return;
+    setAuthSubmitting(true);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || '登录失败');
+        return;
+      }
+      setAppToken(data.token);
+      setToken(data.token);
+      message.success('登录成功');
+    } catch {
+      message.error('网络异常，请稍后重试');
+    } finally {
+      setAuthSubmitting(false);
     }
-    setAppToken(data.token);
-    setToken(data.token);
-    message.success('登录成功');
   };
 
   const onCreateChild = async (values: { name: string; gradeLevel?: string; birthDate?: string }) => {
@@ -138,34 +154,63 @@ export default function AppLearning() {
 
   if (!token) {
     return (
-      <Space direction="vertical" size={16} style={{ width: '100%' }}>
-        <Alert type="info" showIcon message="幼升小启蒙 APP（MVP）" description="先注册家长账号，随后可创建孩子和任务。" />
-        <Card title="家长注册">
-          <Form layout="vertical" onFinish={onRegister}>
-            <Form.Item label="用户名" name="username" rules={[{ required: true }]}>
-              <Input />
-            </Form.Item>
-            <Form.Item label="密码" name="password" rules={[{ required: true, min: 6 }]}>
-              <Input.Password />
-            </Form.Item>
-            <Form.Item label="显示名" name="displayName">
-              <Input />
-            </Form.Item>
-            <Button type="primary" htmlType="submit">注册并进入</Button>
-          </Form>
+      <div style={{ minHeight: '70vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Card style={{ width: '100%', maxWidth: 460 }}>
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <Alert
+              type="info"
+              showIcon
+              message="幼升小启蒙 APP"
+              description="先注册或登录家长账号，再为孩子创建学习任务。"
+            />
+
+            <Tabs
+              activeKey={authMode}
+              onChange={(key) => setAuthMode(key as 'register' | 'login')}
+              items={[
+                {
+                  key: 'register',
+                  label: '注册',
+                  children: (
+                    <Form layout="vertical" onFinish={onRegister} autoComplete="on">
+                      <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
+                        <Input placeholder="请输入用户名" autoComplete="username" />
+                      </Form.Item>
+                      <Form.Item
+                        label="密码"
+                        name="password"
+                        rules={[{ required: true, min: 6, message: '密码至少 6 位' }]}
+                      >
+                        <Input.Password placeholder="请输入密码" autoComplete="new-password" />
+                      </Form.Item>
+                      <Button type="primary" htmlType="submit" loading={authSubmitting} block>
+                        注册并进入
+                      </Button>
+                    </Form>
+                  ),
+                },
+                {
+                  key: 'login',
+                  label: '登录',
+                  children: (
+                    <Form layout="vertical" onFinish={onLogin} autoComplete="on">
+                      <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
+                        <Input placeholder="请输入用户名" autoComplete="username" />
+                      </Form.Item>
+                      <Form.Item label="密码" name="password" rules={[{ required: true, message: '请输入密码' }]}>
+                        <Input.Password placeholder="请输入密码" autoComplete="current-password" />
+                      </Form.Item>
+                      <Button type="primary" htmlType="submit" loading={authSubmitting} block>
+                        登录
+                      </Button>
+                    </Form>
+                  ),
+                },
+              ]}
+            />
+          </Space>
         </Card>
-        <Card title="已有账号登录">
-          <Form layout="vertical" onFinish={onLogin}>
-            <Form.Item label="用户名" name="username" rules={[{ required: true }]}>
-              <Input />
-            </Form.Item>
-            <Form.Item label="密码" name="password" rules={[{ required: true }]}>
-              <Input.Password />
-            </Form.Item>
-            <Button type="primary" htmlType="submit">登录</Button>
-          </Form>
-        </Card>
-      </Space>
+      </div>
     );
   }
 
