@@ -176,6 +176,7 @@ model AppChild {
   updatedAt   DateTime       @updatedAt @map("updated_at")
 
   @@index([parentId])
+  @@unique([parentId, name])
   @@map("AppChild")
 }
 

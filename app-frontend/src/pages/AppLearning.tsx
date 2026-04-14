@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { RefObject, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Alert, Button, Card, Form, Input, List, Select, Space, Tabs, Typography, message } from 'antd';
+import { Alert, Button, Card, Form, Input, List, Select, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
 import dayjs from 'dayjs';
 import { APP_API_BASE, appFetch, clearAppToken, getAppToken, setAppToken } from '../api.app';
 
@@ -15,6 +15,9 @@ interface Child {
   name: string;
   gradeLevel?: string | null;
   birthDate?: string | null;
+  todayTaskCount?: number;
+  weeklyDoneCount?: number;
+  latestLearningAt?: string | null;
 }
 
 interface TaskItem {
@@ -28,37 +31,111 @@ interface TaskItem {
   child?: { id: string; name: string } | null;
 }
 
+interface MaterialItem {
+  id: string;
+  childId?: string | null;
+  taskId?: string | null;
+  createdAt: string;
+  content?: unknown;
+}
+
+function parseMaterialContent(raw: unknown) {
+  const data = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const recognition = data.recognitionResult && typeof data.recognitionResult === 'object'
+    ? (data.recognitionResult as Record<string, unknown>)
+    : null;
+  return {
+    fileName: String(data.fileName || '未命名资料'),
+    sourceType: String(data.sourceType || 'file'),
+    status: String(data.status || 'uploaded'),
+    fileUrl: String(data.fileUrl || ''),
+    recognitionText: recognition ? String(recognition.extractedText || '') : '',
+    recognitionCategory: recognition ? String(recognition.suggestedCategory || '') : '',
+  };
+}
+
+const TASK_STATUS_META: Record<TaskItem['status'], { label: string; color: string }> = {
+  draft: { label: '草稿', color: 'default' },
+  active: { label: '进行中', color: 'processing' },
+  archived: { label: '已归档', color: 'default' },
+};
+
+function getDifficultyLabel(level: number) {
+  if (level === 1) return '入门';
+  if (level === 2) return '基础';
+  return '提升';
+}
+
+function getMaterialStatusMeta(status: string) {
+  if (status === 'recognized') return { label: '已识别', color: 'processing' as const };
+  if (status === 'task_generated') return { label: '已生成任务', color: 'success' as const };
+  if (status === 'failed') return { label: '处理失败', color: 'error' as const };
+  return { label: '待处理', color: 'default' as const };
+}
+
 export default function AppLearning() {
   const [token, setToken] = useState<string | null>(() => getAppToken());
   const [me, setMe] = useState<ParentUser | null>(null);
   const [children, setChildren] = useState<Child[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedChildId, setSelectedChildId] = useState<string | undefined>(undefined);
   const [authMode, setAuthMode] = useState<'register' | 'login'>('register');
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [childSubmitting, setChildSubmitting] = useState(false);
+  const [taskSubmitting, setTaskSubmitting] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [deletingChildId, setDeletingChildId] = useState<string | null>(null);
+  const [materialBusyId, setMaterialBusyId] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadChildId, setUploadChildId] = useState<string | undefined>(undefined);
+  const childSectionRef = useRef<HTMLDivElement | null>(null);
+  const taskSectionRef = useRef<HTMLDivElement | null>(null);
+  const materialSectionRef = useRef<HTMLDivElement | null>(null);
+
+  const totalTodayTaskCount = useMemo(
+    () => children.reduce((sum, child) => sum + (child.todayTaskCount ?? 0), 0),
+    [children]
+  );
+  const totalWeeklyDoneCount = useMemo(
+    () => children.reduce((sum, child) => sum + (child.weeklyDoneCount ?? 0), 0),
+    [children]
+  );
 
   const selectedChild = useMemo(
     () => children.find((c) => c.id === selectedChildId) || null,
     [children, selectedChildId]
   );
 
+  const scrollToSection = (ref: RefObject<HTMLDivElement | null>) => {
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   const reloadAll = async () => {
     if (!token) return;
     setLoading(true);
     try {
-      const [meRes, childRes, taskRes] = await Promise.all([
+      const [meRes, childRes, taskRes, materialRes] = await Promise.all([
         appFetch(`${APP_API_BASE}/auth/me`),
         appFetch(`${APP_API_BASE}/children`),
         appFetch(`${APP_API_BASE}/tasks`),
+        appFetch(`${APP_API_BASE}/library/materials`),
       ]);
-      const [meData, childData, taskData] = await Promise.all([meRes.json(), childRes.json(), taskRes.json()]);
+      const [meData, childData, taskData, materialData] = await Promise.all([
+        meRes.json(),
+        childRes.json(),
+        taskRes.json(),
+        materialRes.json(),
+      ]);
       if (!meRes.ok) throw new Error(meData.error || '用户信息加载失败');
       if (!childRes.ok) throw new Error(childData.error || '孩子列表加载失败');
       if (!taskRes.ok) throw new Error(taskData.error || '任务列表加载失败');
+      if (!materialRes.ok) throw new Error(materialData.error || '资料库加载失败');
       setMe(meData);
       setChildren(Array.isArray(childData) ? childData : []);
       setTasks(Array.isArray(taskData) ? taskData : []);
+      setMaterials(Array.isArray(materialData) ? materialData : []);
     } catch (e) {
       message.error(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -80,7 +157,7 @@ export default function AppLearning() {
       });
       const data = await res.json();
       if (!res.ok) {
-        message.error(data.error || '注册失败');
+        message.error(data.error || data.message || '注册失败');
         return;
       }
       setAppToken(data.token);
@@ -103,7 +180,7 @@ export default function AppLearning() {
       });
       const data = await res.json();
       if (!res.ok) {
-        message.error(data.error || '登录失败');
+        message.error(data.error || data.message || '登录失败');
         return;
       }
       setAppToken(data.token);
@@ -117,18 +194,36 @@ export default function AppLearning() {
   };
 
   const onCreateChild = async (values: { name: string; gradeLevel?: string; birthDate?: string }) => {
-    const res = await appFetch(`${APP_API_BASE}/children`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(values),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      message.error(data.error || '创建孩子失败');
+    const normalizedName = values.name?.trim();
+    if (!normalizedName) {
+      message.warning('请输入孩子姓名');
       return;
     }
-    message.success('孩子档案已创建');
-    reloadAll();
+    const existedLocal = children.some(
+      (c) => c.name.trim().toLowerCase() === normalizedName.toLowerCase()
+    );
+    if (existedLocal) {
+      message.warning('该孩子档案已存在，请勿重复添加');
+      return;
+    }
+
+    setChildSubmitting(true);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/children`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...values, name: normalizedName }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || data.message || '创建孩子失败');
+        return;
+      }
+      message.success('孩子档案已创建');
+      reloadAll();
+    } finally {
+      setChildSubmitting(false);
+    }
   };
 
   const onCreateTask = async (values: {
@@ -138,18 +233,109 @@ export default function AppLearning() {
     childId?: string;
     dueDate?: string;
   }) => {
-    const res = await appFetch(`${APP_API_BASE}/tasks`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(values),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      message.error(data.error || '创建任务失败');
+    setTaskSubmitting(true);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || data.message || '创建任务失败');
+        return;
+      }
+      message.success('任务已创建');
+      reloadAll();
+    } finally {
+      setTaskSubmitting(false);
+    }
+  };
+
+  const onDeleteChild = async (childId: string) => {
+    setDeletingChildId(childId);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/children/${childId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || data.message || '删除孩子失败');
+        return;
+      }
+      if (selectedChildId === childId) setSelectedChildId(undefined);
+      message.success('孩子档案已删除');
+      reloadAll();
+    } finally {
+      setDeletingChildId(null);
+    }
+  };
+
+  const onUploadMaterial = async () => {
+    if (!uploadFile) {
+      message.warning('请先选择要上传的文件');
       return;
     }
-    message.success('任务已创建');
-    reloadAll();
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadFile);
+      if (uploadChildId) formData.append('childId', uploadChildId);
+      const res = await appFetch(`${APP_API_BASE}/library/materials`, {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || data.message || '上传失败');
+        return;
+      }
+      message.success('资料上传成功');
+      setUploadFile(null);
+      reloadAll();
+    } catch {
+      message.error('上传失败，请稍后重试');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const onRecognizeMaterial = async (materialId: string) => {
+    setMaterialBusyId(materialId);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/library/materials/${materialId}/recognize`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || data.message || '识别失败');
+        return;
+      }
+      message.success('识别完成');
+      reloadAll();
+    } finally {
+      setMaterialBusyId(null);
+    }
+  };
+
+  const onGenerateTask = async (materialId: string) => {
+    setMaterialBusyId(materialId);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/library/materials/${materialId}/generate-task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.error(data.error || data.message || '生成任务失败');
+        return;
+      }
+      message.success('已从资料生成学习任务');
+      reloadAll();
+    } finally {
+      setMaterialBusyId(null);
+    }
   };
 
   if (!token) {
@@ -217,75 +403,183 @@ export default function AppLearning() {
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card loading={loading} title="家长端总览" extra={<Button onClick={() => { clearAppToken(); setToken(null); setMe(null); }}>退出</Button>}>
-        <Typography.Paragraph>
-          当前家长：<strong>{me?.displayName || me?.username || '-'}</strong>
-        </Typography.Paragraph>
-        <Typography.Paragraph type="secondary">
-          孩子 {children.length} 人 · 任务 {tasks.length} 条
-        </Typography.Paragraph>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Typography.Paragraph style={{ marginBottom: 0 }}>
+            当前家长：<strong>{me?.displayName || me?.username || '-'}</strong>
+          </Typography.Paragraph>
+          <Space wrap size={12}>
+            <Card size="small" style={{ minWidth: 140 }}>
+              <Typography.Text type="secondary">孩子数</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>{children.length}</Typography.Title>
+            </Card>
+            <Card size="small" style={{ minWidth: 140 }}>
+              <Typography.Text type="secondary">任务总数</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>{tasks.length}</Typography.Title>
+            </Card>
+            <Card size="small" style={{ minWidth: 140 }}>
+              <Typography.Text type="secondary">今日任务</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>{totalTodayTaskCount}</Typography.Title>
+            </Card>
+            <Card size="small" style={{ minWidth: 140 }}>
+              <Typography.Text type="secondary">本周完成</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>{totalWeeklyDoneCount}</Typography.Title>
+            </Card>
+            <Card size="small" style={{ minWidth: 140 }}>
+              <Typography.Text type="secondary">资料总数</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>{materials.length}</Typography.Title>
+            </Card>
+          </Space>
+          <Space wrap>
+            <Button onClick={() => scrollToSection(childSectionRef)}>去孩子管理</Button>
+            <Button onClick={() => scrollToSection(taskSectionRef)}>去创建任务</Button>
+            <Button onClick={() => scrollToSection(materialSectionRef)}>去资料库</Button>
+          </Space>
+        </Space>
       </Card>
 
-      <Card title="创建孩子档案">
-        <Form layout="inline" onFinish={onCreateChild}>
-          <Form.Item name="name" rules={[{ required: true }]}>
-            <Input placeholder="孩子姓名" />
-          </Form.Item>
-          <Form.Item name="gradeLevel">
-            <Select placeholder="年级阶段" style={{ width: 160 }} options={[
-              { label: '学前', value: 'pre_k' },
-              { label: '幼儿园', value: 'kindergarten' },
-              { label: '幼升小', value: 'primary_prep' },
-            ]} />
-          </Form.Item>
-          <Form.Item>
-            <Button type="primary" htmlType="submit">新增孩子</Button>
-          </Form.Item>
-        </Form>
-      </Card>
+      <div ref={childSectionRef}>
+        <Card title="创建孩子档案">
+          <Form layout="inline" onFinish={onCreateChild}>
+            <Form.Item name="name" rules={[{ required: true, message: '请输入孩子姓名' }]}>
+              <Input placeholder="孩子姓名" />
+            </Form.Item>
+            <Form.Item name="gradeLevel">
+              <Select placeholder="年级阶段" style={{ width: 160 }} options={[
+                { label: '学前', value: 'pre_k' },
+                { label: '幼儿园', value: 'kindergarten' },
+                { label: '幼升小', value: 'primary_prep' },
+              ]} />
+            </Form.Item>
+            <Form.Item>
+              <Button type="primary" htmlType="submit" loading={childSubmitting} disabled={childSubmitting}>新增孩子</Button>
+            </Form.Item>
+          </Form>
+        </Card>
+      </div>
 
-      <Card title="创建学习任务">
-        <Form layout="inline" onFinish={onCreateTask}>
-          <Form.Item name="title" rules={[{ required: true }]}>
-            <Input placeholder="任务标题" />
-          </Form.Item>
-          <Form.Item name="category" rules={[{ required: true }]}>
-            <Select
-              placeholder="任务分类"
-              style={{ width: 140 }}
-              options={[
-                { label: '识字', value: 'literacy' },
-                { label: '数学', value: 'math' },
-                { label: '表达', value: 'expression' },
-                { label: '习惯', value: 'habit' },
-              ]}
+      <div ref={taskSectionRef}>
+        <Card title="创建学习任务">
+          <Form layout="inline" onFinish={onCreateTask}>
+            <Form.Item name="title" rules={[{ required: true, message: '请输入任务标题' }]}>
+              <Input placeholder="任务标题" />
+            </Form.Item>
+            <Form.Item name="category" rules={[{ required: true, message: '请选择任务分类' }]}>
+              <Select
+                placeholder="任务分类"
+                style={{ width: 140 }}
+                options={[
+                  { label: '语文', value: '语文' },
+                  { label: '数学', value: '数学' },
+                  { label: '英语', value: '英语' },
+                  { label: '社会科学', value: '社会科学' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="difficulty">
+              <Select
+                placeholder="难度"
+                style={{ width: 160 }}
+                options={[
+                  { label: '入门', value: 1 },
+                  { label: '基础', value: 2 },
+                  { label: '提升', value: 3 },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="childId">
+              <Select
+                allowClear
+                placeholder="分配给孩子"
+                style={{ width: 180 }}
+                options={children.map((c) => ({ label: c.name, value: c.id }))}
+              />
+            </Form.Item>
+            <Form.Item>
+              <Button type="primary" htmlType="submit" loading={taskSubmitting} disabled={taskSubmitting}>新增任务</Button>
+            </Form.Item>
+          </Form>
+        </Card>
+      </div>
+
+      <div ref={materialSectionRef}>
+        <Card title="共享资料库（上传→识别→生成任务）">
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap>
+            <input
+              type="file"
+              onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+              accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx"
             />
-          </Form.Item>
-          <Form.Item name="difficulty">
-            <Select
-              placeholder="难度"
-              style={{ width: 120 }}
-              options={[
-                { label: '1', value: 1 },
-                { label: '2', value: 2 },
-                { label: '3', value: 3 },
-                { label: '4', value: 4 },
-                { label: '5', value: 5 },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="childId">
             <Select
               allowClear
-              placeholder="分配给孩子"
+              placeholder="可选：绑定孩子"
               style={{ width: 180 }}
+              value={uploadChildId}
+              onChange={(v) => setUploadChildId(v)}
               options={children.map((c) => ({ label: c.name, value: c.id }))}
             />
-          </Form.Item>
-          <Form.Item>
-            <Button type="primary" htmlType="submit">新增任务</Button>
-          </Form.Item>
-        </Form>
+            <Button type="primary" onClick={onUploadMaterial} loading={uploading} disabled={uploading}>上传资料</Button>
+          </Space>
+
+          <List
+            dataSource={materials}
+            locale={{ emptyText: '暂无共享资料' }}
+            renderItem={(item) => {
+              const parsed = parseMaterialContent(item.content);
+              const materialStatus = getMaterialStatusMeta(parsed.status);
+              const canGenerate = parsed.status === 'recognized' || !!parsed.recognitionText;
+              return (
+                <List.Item
+                  actions={[
+                    <Button
+                      key="recognize"
+                      size="small"
+                      loading={materialBusyId === item.id}
+                      onClick={() => onRecognizeMaterial(item.id)}
+                    >
+                      识别
+                    </Button>,
+                    <Button
+                      key="gen"
+                      size="small"
+                      type="primary"
+                      disabled={!canGenerate}
+                      loading={materialBusyId === item.id}
+                      onClick={() => onGenerateTask(item.id)}
+                    >
+                      生成任务
+                    </Button>,
+                  ]}
+                >
+                  <Space direction="vertical" size={4}>
+                    <Space wrap>
+                      <Typography.Text strong>{parsed.fileName}</Typography.Text>
+                      <Tag color={materialStatus.color}>{materialStatus.label}</Tag>
+                      <Tag>{parsed.sourceType}</Tag>
+                      {item.childId ? <Tag color="blue">已绑定孩子</Tag> : <Tag>未绑定孩子</Tag>}
+                    </Space>
+                    <Typography.Text type="secondary">
+                      上传时间：{dayjs(item.createdAt).format('YYYY-MM-DD HH:mm')}
+                    </Typography.Text>
+                    {parsed.recognitionText && (
+                      <Typography.Text type="secondary">
+                        识别结果：{parsed.recognitionText}
+                        {parsed.recognitionCategory ? `（推荐分类：${parsed.recognitionCategory}）` : ''}
+                      </Typography.Text>
+                    )}
+                    {!!parsed.fileUrl && (
+                      <Typography.Link href={`${APP_API_BASE.replace('/api/app', '')}${parsed.fileUrl}`} target="_blank">
+                        查看文件
+                      </Typography.Link>
+                    )}
+                  </Space>
+                </List.Item>
+              );
+            }}
+          />
+        </Space>
       </Card>
+      </div>
 
       <Card title="孩子列表">
         <Select
@@ -297,7 +591,7 @@ export default function AppLearning() {
           options={children.map((c) => ({ label: c.name, value: c.id }))}
         />
         {selectedChild && (
-          <Space direction="vertical" size={4}>
+          <Space direction="vertical" size={4} style={{ marginBottom: 12 }}>
             <Typography.Paragraph style={{ marginBottom: 0 }}>
               进入儿童端：<Link to={`/child/${selectedChild.id}/today`}>{selectedChild.name} 的今日任务</Link>
             </Typography.Paragraph>
@@ -310,11 +604,43 @@ export default function AppLearning() {
           dataSource={children}
           locale={{ emptyText: '暂无孩子档案' }}
           renderItem={(item) => (
-            <List.Item>
-              <Space>
-                <Typography.Text strong>{item.name}</Typography.Text>
-                {item.gradeLevel && <Typography.Text type="secondary">{item.gradeLevel}</Typography.Text>}
-                {item.birthDate && <Typography.Text type="secondary">{dayjs(item.birthDate).format('YYYY-MM-DD')}</Typography.Text>}
+            <List.Item
+              actions={[
+                <Link key="today" to={`/child/${item.id}/today`}>今日任务</Link>,
+                <Link key="report" to={`/reports/${item.id}`}>学习报告</Link>,
+                <Popconfirm
+                  key="delete"
+                  title="确认删除孩子档案？"
+                  description="删除后不可恢复，该孩子任务进度也会被移除。"
+                  okText="确认删除"
+                  cancelText="取消"
+                  onConfirm={() => onDeleteChild(item.id)}
+                >
+                  <Button
+                    danger
+                    type="text"
+                    size="small"
+                    loading={deletingChildId === item.id}
+                    disabled={deletingChildId !== null && deletingChildId !== item.id}
+                  >
+                    删除
+                  </Button>
+                </Popconfirm>,
+              ]}
+            >
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space wrap>
+                  <Typography.Text strong>{item.name}</Typography.Text>
+                  {item.gradeLevel && <Tag color="blue">{item.gradeLevel}</Tag>}
+                  {item.birthDate && <Typography.Text type="secondary">{dayjs(item.birthDate).format('YYYY-MM-DD')}</Typography.Text>}
+                </Space>
+                <Space size={8} wrap>
+                  <Tag color={((item.todayTaskCount ?? 0) > 0 ? 'orange' : 'default')}>今日任务 {(item.todayTaskCount ?? 0)} 条</Tag>
+                  <Tag color={((item.weeklyDoneCount ?? 0) > 0 ? 'green' : 'default')}>本周完成 {(item.weeklyDoneCount ?? 0)} 条</Tag>
+                  <Tag>
+                    最近学习 {item.latestLearningAt ? dayjs(item.latestLearningAt).format('MM-DD HH:mm') : '暂无'}
+                  </Tag>
+                </Space>
               </Space>
             </List.Item>
           )}
@@ -325,18 +651,23 @@ export default function AppLearning() {
         <List
           dataSource={tasks}
           locale={{ emptyText: '暂无任务' }}
-          renderItem={(item) => (
-            <List.Item>
-              <Space direction="vertical" size={0}>
-                <Typography.Text strong>{item.title}</Typography.Text>
-                <Typography.Text type="secondary">
-                  {item.category} · 难度 {item.difficulty} · {item.status}
-                  {item.child?.name ? ` · ${item.child.name}` : ' · 全家可见'}
-                  {item.dueDate ? ` · 截止 ${dayjs(item.dueDate).format('YYYY-MM-DD')}` : ''}
-                </Typography.Text>
-              </Space>
-            </List.Item>
-          )}
+          renderItem={(item) => {
+            const statusMeta = TASK_STATUS_META[item.status];
+            return (
+              <List.Item>
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <Space wrap>
+                    <Typography.Text strong>{item.title}</Typography.Text>
+                    <Tag color="blue">{item.category}</Tag>
+                    <Tag>{getDifficultyLabel(item.difficulty)}</Tag>
+                    <Tag color={statusMeta.color}>{statusMeta.label}</Tag>
+                    {item.child?.name ? <Tag color="green">{item.child.name}</Tag> : <Tag>全家可见</Tag>}
+                    {item.dueDate && <Tag color="orange">截止 {dayjs(item.dueDate).format('MM-DD')}</Tag>}
+                  </Space>
+                </Space>
+              </List.Item>
+            );
+          }}
         />
       </Card>
     </Space>

@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
+import path from 'path';
+import fs from 'fs';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
+import multer from 'multer';
+import { ArtifactType, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { requireAppParent, signAppParentToken, type AppParentTokenPayload } from '../lib/app-auth';
 
@@ -24,6 +28,49 @@ function getParent(req: Request): AppParentTokenPayload | null {
   return (req as Request & { appParent?: AppParentTokenPayload }).appParent || null;
 }
 
+function normalizeCategory(input?: string): string | null {
+  const value = input?.trim();
+  if (!value) return null;
+  const aliases: Record<string, string> = {
+    literacy: '语文',
+    math: '数学',
+    english: '英语',
+    social: '社会科学',
+    expression: '语文',
+    habit: '社会科学',
+  };
+  return aliases[value] || value;
+}
+
+const APP_TASK_CATEGORIES = ['语文', '数学', '英语', '社会科学'] as const;
+const APP_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'app-library');
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      fs.mkdirSync(APP_UPLOAD_DIR, { recursive: true });
+      cb(null, APP_UPLOAD_DIR);
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || '').slice(0, 20);
+      const safeBase = (path.basename(file.originalname || 'material', ext) || 'material').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '_');
+      cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeBase}${ext}`);
+    },
+  }),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+function toFieldErrors(input: Record<string, string>) {
+  return Object.entries(input).map(([field, message]) => ({ field, message }));
+}
+
+function badRequest(res: Response, message: string, fieldErrors?: Record<string, string>) {
+  res.status(400).json({
+    code: 'BAD_REQUEST',
+    message,
+    fieldErrors: fieldErrors ? toFieldErrors(fieldErrors) : undefined,
+  });
+}
+
 async function ensureOwnedChild(parentId: string, childId: string) {
   return prisma.appChild.findFirst({ where: { id: childId, parentId } });
 }
@@ -43,16 +90,16 @@ router.post('/auth/register', authLimiter, async (req: Request, res: Response) =
     const p = password?.trim();
     const d = displayName?.trim() || u;
     if (!u || !p) {
-      res.status(400).json({ error: 'username and password required' });
+      res.status(400).json({ error: '请输入用户名和密码' });
       return;
     }
     if (p.length < 6) {
-      res.status(400).json({ error: 'password too short' });
+      res.status(400).json({ error: '密码长度至少 6 位' });
       return;
     }
     const existed = await prisma.appParent.findUnique({ where: { username: u } });
     if (existed) {
-      res.status(409).json({ error: 'username already exists' });
+      res.status(409).json({ error: '用户名已存在' });
       return;
     }
     const passwordHash = await bcrypt.hash(p, 10);
@@ -74,17 +121,17 @@ router.post('/auth/login', authLimiter, async (req: Request, res: Response) => {
     const u = username?.trim();
     const p = password?.trim();
     if (!u || !p) {
-      res.status(400).json({ error: 'username and password required' });
+      res.status(400).json({ error: '请输入用户名和密码' });
       return;
     }
     const parent = await prisma.appParent.findUnique({ where: { username: u } });
     if (!parent) {
-      res.status(401).json({ error: 'Invalid credentials' });
+      res.status(401).json({ error: '用户名或密码错误' });
       return;
     }
     const ok = await bcrypt.compare(p, parent.passwordHash);
     if (!ok) {
-      res.status(401).json({ error: 'Invalid credentials' });
+      res.status(401).json({ error: '用户名或密码错误' });
       return;
     }
     const token = signAppParentToken({ id: parent.id, username: parent.username });
@@ -122,7 +169,53 @@ router.get('/children', requireAppParent, async (req: Request, res: Response) =>
     where: { parentId: payload.sub },
     orderBy: { createdAt: 'desc' },
   });
-  res.json(list);
+
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const endOfToday = new Date();
+  endOfToday.setHours(23, 59, 59, 999);
+
+  const startOfWeek = new Date();
+  const day = startOfWeek.getDay();
+  const diff = day === 0 ? 6 : day - 1;
+  startOfWeek.setDate(startOfWeek.getDate() - diff);
+  startOfWeek.setHours(0, 0, 0, 0);
+
+  const withStats = await Promise.all(
+    list.map(async (child) => {
+      const [todayTaskCount, weeklyDoneCount, latestProgress] = await Promise.all([
+        prisma.learningTask.count({
+          where: {
+            parentId: payload.sub,
+            childId: child.id,
+            status: 'active',
+            OR: [{ dueDate: null }, { dueDate: { gte: startOfToday, lte: endOfToday } }],
+          },
+        }),
+        prisma.taskProgress.count({
+          where: {
+            childId: child.id,
+            status: 'done',
+            completedAt: { gte: startOfWeek },
+          },
+        }),
+        prisma.taskProgress.findFirst({
+          where: { childId: child.id },
+          orderBy: { updatedAt: 'desc' },
+          select: { updatedAt: true },
+        }),
+      ]);
+
+      return {
+        ...child,
+        todayTaskCount,
+        weeklyDoneCount,
+        latestLearningAt: latestProgress?.updatedAt || null,
+      };
+    })
+  );
+
+  res.json(withStats);
 });
 
 router.post('/children', requireAppParent, writeLimiter, async (req: Request, res: Response) => {
@@ -140,7 +233,18 @@ router.post('/children', requireAppParent, writeLimiter, async (req: Request, re
     };
     const n = name?.trim();
     if (!n) {
-      res.status(400).json({ error: 'name required' });
+      res.status(400).json({ error: '请输入孩子姓名' });
+      return;
+    }
+
+    const existed = await prisma.appChild.findFirst({
+      where: {
+        parentId: payload.sub,
+        name: { equals: n, mode: 'insensitive' },
+      },
+    });
+    if (existed) {
+      res.status(409).json({ error: '该孩子档案已存在，请勿重复添加' });
       return;
     }
     const created = await prisma.appChild.create({
@@ -154,6 +258,10 @@ router.post('/children', requireAppParent, writeLimiter, async (req: Request, re
     });
     res.json(created);
   } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      res.status(409).json({ error: '该孩子档案已存在，请勿重复添加' });
+      return;
+    }
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
   }
@@ -182,7 +290,7 @@ router.patch('/children/:id', requireAppParent, writeLimiter, async (req: Reques
     }
     const child = await ensureOwnedChild(payload.sub, req.params.id);
     if (!child) {
-      res.status(404).json({ error: 'Child not found' });
+      res.status(404).json({ error: '未找到孩子档案' });
       return;
     }
     const { name, avatarUrl, birthDate, gradeLevel } = req.body as {
@@ -216,7 +324,7 @@ router.delete('/children/:id', requireAppParent, writeLimiter, async (req: Reque
     }
     const child = await ensureOwnedChild(payload.sub, req.params.id);
     if (!child) {
-      res.status(404).json({ error: 'Child not found' });
+      res.status(404).json({ error: '未找到孩子档案' });
       return;
     }
     await prisma.appChild.delete({ where: { id: child.id } });
@@ -262,26 +370,39 @@ router.post('/tasks', requireAppParent, writeLimiter, async (req: Request, res: 
       dueDate?: string;
     };
     const t = title?.trim();
-    const c = category?.trim();
-    if (!t || !c) {
-      res.status(400).json({ error: 'title and category required' });
+    if (!t) {
+      badRequest(res, '请填写任务标题', { title: '请填写任务标题' });
       return;
     }
+
+    const normalizedCategory = normalizeCategory(category);
+    if (!normalizedCategory) {
+      badRequest(res, '请选择任务分类', { category: '请选择任务分类' });
+      return;
+    }
+    if (!APP_TASK_CATEGORIES.includes(normalizedCategory as typeof APP_TASK_CATEGORIES[number])) {
+      badRequest(res, '任务分类仅支持：语文、数学、英语、社会科学', {
+        category: '任务分类仅支持：语文、数学、英语、社会科学',
+      });
+      return;
+    }
+
     if (childId) {
       const child = await ensureOwnedChild(payload.sub, childId);
       if (!child) {
-        res.status(403).json({ error: 'Forbidden child' });
+        res.status(403).json({ error: '无权限访问该孩子档案' });
         return;
       }
     }
+
     const created = await prisma.learningTask.create({
       data: {
         parentId: payload.sub,
         childId: childId || null,
         title: t,
         description: description?.trim() || null,
-        category: c,
-        difficulty: Math.max(1, Math.min(5, Number(difficulty) || 1)),
+        category: normalizedCategory,
+        difficulty: Math.max(1, Math.min(3, Number(difficulty) || 1)),
         dueDate: dueDate ? new Date(dueDate) : null,
       },
       include: { child: { select: { id: true, name: true } } },
@@ -329,7 +450,7 @@ router.patch('/tasks/:id', requireAppParent, writeLimiter, async (req: Request, 
     }
     const task = await ensureOwnedTask(payload.sub, req.params.id);
     if (!task) {
-      res.status(404).json({ error: 'Task not found' });
+      res.status(404).json({ error: '未找到学习任务' });
       return;
     }
     const { title, description, category, difficulty, childId, dueDate, status } = req.body as {
@@ -347,7 +468,7 @@ router.patch('/tasks/:id', requireAppParent, writeLimiter, async (req: Request, 
       if (childId) {
         const child = await ensureOwnedChild(payload.sub, childId);
         if (!child) {
-          res.status(403).json({ error: 'Forbidden child' });
+          res.status(403).json({ error: '无权限访问该孩子档案' });
           return;
         }
         nextChildId = child.id;
@@ -356,13 +477,21 @@ router.patch('/tasks/:id', requireAppParent, writeLimiter, async (req: Request, 
       }
     }
 
+    const normalizedCategory = category === undefined ? task.category : normalizeCategory(category) || task.category;
+    if (!APP_TASK_CATEGORIES.includes(normalizedCategory as typeof APP_TASK_CATEGORIES[number])) {
+      badRequest(res, '任务分类仅支持：语文、数学、英语、社会科学', {
+        category: '任务分类仅支持：语文、数学、英语、社会科学',
+      });
+      return;
+    }
+
     const updated = await prisma.learningTask.update({
       where: { id: task.id },
       data: {
         title: title?.trim() || task.title,
         description: description === undefined ? task.description : description?.trim() || null,
-        category: category?.trim() || task.category,
-        difficulty: difficulty === undefined ? task.difficulty : Math.max(1, Math.min(5, Number(difficulty) || 1)),
+        category: normalizedCategory,
+        difficulty: difficulty === undefined ? task.difficulty : Math.max(1, Math.min(3, Number(difficulty) || 1)),
         childId: nextChildId,
         dueDate: dueDate === undefined ? task.dueDate : dueDate ? new Date(dueDate) : null,
         status: status || task.status,
@@ -394,11 +523,234 @@ router.delete('/tasks/:id', requireAppParent, writeLimiter, async (req: Request,
     }
     const task = await ensureOwnedTask(payload.sub, req.params.id);
     if (!task) {
-      res.status(404).json({ error: 'Task not found' });
+      res.status(404).json({ error: '未找到学习任务' });
       return;
     }
     await prisma.learningTask.delete({ where: { id: task.id } });
     res.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+function inferSourceType(mimeType: string, fileName: string) {
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+  if (mimeType.startsWith('audio/')) return 'audio';
+  const ext = path.extname(fileName).toLowerCase();
+  if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) return 'image';
+  if (['.mp4', '.mov', '.webm'].includes(ext)) return 'video';
+  if (['.mp3', '.wav', '.m4a'].includes(ext)) return 'audio';
+  return 'file';
+}
+
+function inferArtifactType(sourceType: string): ArtifactType {
+  if (sourceType === 'image') return ArtifactType.image;
+  return ArtifactType.summary;
+}
+
+function detectTextFromFilename(fileName: string) {
+  const base = path.basename(fileName, path.extname(fileName));
+  return base.replace(/[_-]+/g, ' ').trim();
+}
+
+router.get('/library/materials', requireAppParent, async (req: Request, res: Response) => {
+  const payload = getParent(req);
+  if (!payload) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  const materials = await prisma.appArtifact.findMany({
+    where: { parentId: payload.sub },
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+  });
+  res.json(materials);
+});
+
+router.post('/library/materials', requireAppParent, writeLimiter, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (!err) {
+      next();
+      return;
+    }
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        badRequest(res, '文件过大，单个文件不能超过 20MB', { file: '文件过大，单个文件不能超过 20MB' });
+        return;
+      }
+      badRequest(res, '上传失败，请检查文件后重试', { file: '上传失败，请检查文件后重试' });
+      return;
+    }
+    next(err);
+  });
+}, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (!file) {
+      badRequest(res, '请先上传资料文件', { file: '请先上传资料文件' });
+      return;
+    }
+
+    const childId = (req.body?.childId as string | undefined)?.trim() || null;
+    if (childId) {
+      const child = await ensureOwnedChild(payload.sub, childId);
+      if (!child) {
+        res.status(403).json({ error: '无权限访问该孩子档案' });
+        return;
+      }
+    }
+
+    const sourceType = inferSourceType(file.mimetype || '', file.originalname || file.filename);
+    const fileUrl = `/uploads/app-library/${file.filename}`;
+
+    const created = await prisma.appArtifact.create({
+      data: {
+        parentId: payload.sub,
+        childId,
+        type: inferArtifactType(sourceType),
+        content: {
+          sourceType,
+          fileName: file.originalname,
+          mimeType: file.mimetype || null,
+          fileSize: file.size,
+          fileUrl,
+          status: 'uploaded',
+          recognitionResult: null,
+        },
+      },
+    });
+
+    res.json(created);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+router.post('/library/materials/:id/recognize', requireAppParent, writeLimiter, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const material = await prisma.appArtifact.findFirst({ where: { id: req.params.id, parentId: payload.sub } });
+    if (!material) {
+      res.status(404).json({ error: '未找到学习资料' });
+      return;
+    }
+
+    const content = (material.content || {}) as Record<string, unknown>;
+    const fileName = String(content.fileName || '');
+    const sourceType = String(content.sourceType || 'file');
+    const recognitionResult = {
+      sourceType,
+      extractedText: detectTextFromFilename(fileName),
+      suggestedCategory: sourceType === 'audio' ? '英语' : sourceType === 'video' ? '社会科学' : '语文',
+      suggestedDifficulty: 1,
+      recognizedAt: new Date().toISOString(),
+    };
+
+    const updated = await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: {
+        content: {
+          ...content,
+          status: 'recognized',
+          recognitionResult,
+        },
+      },
+    });
+
+    res.json(updated);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+router.post('/library/materials/:id/generate-task', requireAppParent, writeLimiter, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const material = await prisma.appArtifact.findFirst({ where: { id: req.params.id, parentId: payload.sub } });
+    if (!material) {
+      res.status(404).json({ error: '未找到学习资料' });
+      return;
+    }
+
+    const { childId, title, category, difficulty } = req.body as {
+      childId?: string;
+      title?: string;
+      category?: string;
+      difficulty?: number;
+    };
+
+    let nextChildId: string | null = material.childId || null;
+    if (childId?.trim()) {
+      const child = await ensureOwnedChild(payload.sub, childId.trim());
+      if (!child) {
+        res.status(403).json({ error: '无权限访问该孩子档案' });
+        return;
+      }
+      nextChildId = child.id;
+    }
+
+    const content = (material.content || {}) as Record<string, unknown>;
+    const recognition = ((content.recognitionResult || {}) as Record<string, unknown>);
+    const categoryCandidate = normalizeCategory(category) || normalizeCategory(String(recognition.suggestedCategory || '')) || '语文';
+    const safeCategory = APP_TASK_CATEGORIES.includes(categoryCandidate as typeof APP_TASK_CATEGORIES[number])
+      ? categoryCandidate
+      : '语文';
+
+    const task = await prisma.learningTask.create({
+      data: {
+        parentId: payload.sub,
+        childId: nextChildId,
+        title: title?.trim() || `${String(content.fileName || '学习资料')}学习任务`,
+        description: `由资料《${String(content.fileName || '未命名资料')}》自动生成`,
+        category: safeCategory,
+        difficulty: Math.max(1, Math.min(3, Number(difficulty) || Number(recognition.suggestedDifficulty) || 1)),
+        source: 'library-generated',
+      },
+      include: { child: { select: { id: true, name: true } } },
+    });
+
+    if (task.childId) {
+      await prisma.taskProgress.upsert({
+        where: { taskId_childId: { taskId: task.id, childId: task.childId } },
+        update: {},
+        create: { taskId: task.id, childId: task.childId },
+      });
+    }
+
+    await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: {
+        taskId: task.id,
+        content: {
+          ...content,
+          status: 'task_generated',
+          generatedTaskId: task.id,
+          generatedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    res.json(task);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
