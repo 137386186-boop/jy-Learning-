@@ -237,12 +237,12 @@ router.post('/children', requireAppParent, writeLimiter, async (req: Request, re
       return;
     }
 
-    const existed = await prisma.appChild.findFirst({
-      where: {
-        parentId: payload.sub,
-        name: { equals: n, mode: 'insensitive' },
-      },
+    const normalizedName = n.replace(/\s+/g, '').toLowerCase();
+    const siblings = await prisma.appChild.findMany({
+      where: { parentId: payload.sub },
+      select: { id: true, name: true },
     });
+    const existed = siblings.find((child) => child.name.replace(/\s+/g, '').toLowerCase() === normalizedName);
     if (existed) {
       res.status(409).json({ error: '该孩子档案已存在，请勿重复添加' });
       return;
