@@ -99,8 +99,7 @@ export default function AppLearning() {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [selectedChildId, setSelectedChildId] = useState<string | undefined>(undefined);
-  const [authMode, setAuthMode] = useState<'register' | 'login'>('register');
+  const [authMode, setAuthMode] = useState<'register' | 'login'>('login');
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [childSubmitting, setChildSubmitting] = useState(false);
   const [taskSubmitting, setTaskSubmitting] = useState(false);
@@ -119,35 +118,61 @@ export default function AppLearning() {
     [children]
   );
 
-  const selectedChild = useMemo(
-    () => children.find((c) => c.id === selectedChildId) || null,
-    [children, selectedChildId]
-  );
-
   const reloadAll = async () => {
     if (!token) return;
     setLoading(true);
     try {
-      const [meRes, childRes, taskRes, materialRes] = await Promise.all([
-        appFetch(`${APP_API_BASE}/auth/me`),
+      const meRes = await appFetch(`${APP_API_BASE}/auth/me`);
+      const meData = await parseApiResponse(meRes);
+      if (!meRes.ok) {
+        throw new Error(getApiErrorMessage(meData, '用户信息加载失败'));
+      }
+      setMe((meData && typeof meData === 'object' ? meData : null) as ParentUser | null);
+
+      const [childRes, taskRes, materialRes] = await Promise.all([
         appFetch(`${APP_API_BASE}/children`),
         appFetch(`${APP_API_BASE}/tasks`),
         appFetch(`${APP_API_BASE}/library/materials`),
       ]);
-      const [meData, childData, taskData, materialData] = await Promise.all([
-        parseApiResponse(meRes),
-        parseApiResponse(childRes),
-        parseApiResponse(taskRes),
-        parseApiResponse(materialRes),
-      ]);
-      if (!meRes.ok) throw new Error(getApiErrorMessage(meData, '用户信息加载失败'));
-      if (!childRes.ok) throw new Error(getApiErrorMessage(childData, '孩子列表加载失败'));
-      if (!taskRes.ok) throw new Error(getApiErrorMessage(taskData, '任务列表加载失败'));
-      if (!materialRes.ok) throw new Error(getApiErrorMessage(materialData, '资料库加载失败'));
-      setMe((meData && typeof meData === 'object' ? meData : null) as ParentUser | null);
-      setChildren(Array.isArray(childData) ? (childData as Child[]) : []);
-      setTasks(Array.isArray(taskData) ? (taskData as TaskItem[]) : []);
-      setMaterials(Array.isArray(materialData) ? (materialData as MaterialItem[]) : []);
+
+      const errors: string[] = [];
+
+      try {
+        const childData = await parseApiResponse(childRes);
+        if (childRes.ok) {
+          setChildren(Array.isArray(childData) ? (childData as Child[]) : []);
+        } else {
+          errors.push(getApiErrorMessage(childData, '孩子列表加载失败'));
+        }
+      } catch {
+        errors.push('孩子列表服务暂时不可用，请稍后重试');
+      }
+
+      try {
+        const taskData = await parseApiResponse(taskRes);
+        if (taskRes.ok) {
+          setTasks(Array.isArray(taskData) ? (taskData as TaskItem[]) : []);
+        } else {
+          errors.push(getApiErrorMessage(taskData, '任务列表加载失败'));
+        }
+      } catch {
+        errors.push('任务列表服务暂时不可用，请稍后重试');
+      }
+
+      try {
+        const materialData = await parseApiResponse(materialRes);
+        if (materialRes.ok) {
+          setMaterials(Array.isArray(materialData) ? (materialData as MaterialItem[]) : []);
+        } else {
+          errors.push(getApiErrorMessage(materialData, '资料库加载失败'));
+        }
+      } catch {
+        errors.push('资料库服务暂时不可用，请稍后重试');
+      }
+
+      if (errors.length) {
+        message.warning(errors[0]);
+      }
     } catch (e) {
       message.error(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -242,7 +267,9 @@ export default function AppLearning() {
         return;
       }
       message.success('孩子档案已创建');
-      reloadAll();
+      await reloadAll();
+    } catch {
+      message.error('创建孩子失败，请稍后重试');
     } finally {
       setChildSubmitting(false);
     }
@@ -268,7 +295,9 @@ export default function AppLearning() {
         return;
       }
       message.success('任务已创建');
-      reloadAll();
+      await reloadAll();
+    } catch {
+      message.error('创建任务失败，请稍后重试');
     } finally {
       setTaskSubmitting(false);
     }
@@ -285,9 +314,8 @@ export default function AppLearning() {
         message.error(getApiErrorMessage(data, '删除孩子失败'));
         return;
       }
-      if (selectedChildId === childId) setSelectedChildId(undefined);
       message.success('孩子档案已删除');
-      reloadAll();
+      await reloadAll();
     } finally {
       setDeletingChildId(null);
     }
@@ -314,7 +342,8 @@ export default function AppLearning() {
       }
       message.success('资料上传成功');
       setUploadFile(null);
-      reloadAll();
+      setUploadChildId(undefined);
+      await reloadAll();
     } catch {
       message.error('上传失败，请稍后重试');
     } finally {
@@ -334,7 +363,7 @@ export default function AppLearning() {
         return;
       }
       message.success('识别完成');
-      reloadAll();
+      await reloadAll();
     } finally {
       setMaterialBusyId(null);
     }
@@ -354,7 +383,7 @@ export default function AppLearning() {
         return;
       }
       message.success('已从资料生成学习任务');
-      reloadAll();
+      await reloadAll();
     } finally {
       setMaterialBusyId(null);
     }
@@ -377,6 +406,23 @@ export default function AppLearning() {
               onChange={(key) => setAuthMode(key as 'register' | 'login')}
               items={[
                 {
+                  key: 'login',
+                  label: '登录',
+                  children: (
+                    <Form layout="vertical" onFinish={onLogin} autoComplete="on">
+                      <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
+                        <Input placeholder="请输入用户名" autoComplete="username" />
+                      </Form.Item>
+                      <Form.Item label="密码" name="password" rules={[{ required: true, message: '请输入密码' }]}>
+                        <Input.Password placeholder="请输入密码" autoComplete="current-password" />
+                      </Form.Item>
+                      <Button type="primary" htmlType="submit" loading={authSubmitting} block>
+                        登录
+                      </Button>
+                    </Form>
+                  ),
+                },
+                {
                   key: 'register',
                   label: '注册',
                   children: (
@@ -393,23 +439,6 @@ export default function AppLearning() {
                       </Form.Item>
                       <Button type="primary" htmlType="submit" loading={authSubmitting} block>
                         注册并进入
-                      </Button>
-                    </Form>
-                  ),
-                },
-                {
-                  key: 'login',
-                  label: '登录',
-                  children: (
-                    <Form layout="vertical" onFinish={onLogin} autoComplete="on">
-                      <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-                        <Input placeholder="请输入用户名" autoComplete="username" />
-                      </Form.Item>
-                      <Form.Item label="密码" name="password" rules={[{ required: true, message: '请输入密码' }]}>
-                        <Input.Password placeholder="请输入密码" autoComplete="current-password" />
-                      </Form.Item>
-                      <Button type="primary" htmlType="submit" loading={authSubmitting} block>
-                        登录
                       </Button>
                     </Form>
                   ),
@@ -471,25 +500,6 @@ export default function AppLearning() {
               <Button type="primary" htmlType="submit" loading={childSubmitting} disabled={childSubmitting}>新增孩子</Button>
             </Form.Item>
           </Form>
-
-          <Select
-            allowClear
-            placeholder="选择孩子查看今日任务入口"
-            style={{ width: 260 }}
-            value={selectedChildId}
-            onChange={(v) => setSelectedChildId(v)}
-            options={children.map((c) => ({ label: c.name, value: c.id }))}
-          />
-          {selectedChild && (
-            <Space direction="vertical" size={4}>
-              <Typography.Paragraph style={{ marginBottom: 0 }}>
-                进入儿童端：<Link to={`/child/${selectedChild.id}/today`}>{selectedChild.name} 的今日任务</Link>
-              </Typography.Paragraph>
-              <Typography.Paragraph style={{ marginBottom: 0 }}>
-                查看报告：<Link to={`/reports/${selectedChild.id}`}>{selectedChild.name} 的学习报告</Link>
-              </Typography.Paragraph>
-            </Space>
-          )}
 
           <List
             dataSource={children}
