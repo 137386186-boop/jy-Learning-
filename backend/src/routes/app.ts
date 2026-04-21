@@ -7,6 +7,8 @@ import multer from 'multer';
 import { ArtifactType, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { requireAppParent, signAppParentToken, type AppParentTokenPayload } from '../lib/app-auth';
+import { recognizeMaterial } from '../lib/ai-recognition';
+import { generateProfessionalMedia } from '../lib/media-generation';
 
 const router = Router();
 
@@ -77,6 +79,18 @@ async function ensureOwnedChild(parentId: string, childId: string) {
 
 async function ensureOwnedTask(parentId: string, taskId: string) {
   return prisma.learningTask.findFirst({ where: { id: taskId, parentId } });
+}
+
+function parseProgressAnswerData(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  return {};
+}
+
+function toNumber(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
 
 router.post('/auth/register', authLimiter, async (req: Request, res: Response) => {
@@ -555,6 +569,185 @@ function detectTextFromFilename(fileName: string) {
   return base.replace(/[_-]+/g, ' ').trim();
 }
 
+function resolveUploadFilePath(fileUrl: string) {
+  const relative = fileUrl.replace(/^\/+/, '');
+  return path.resolve(process.cwd(), relative);
+}
+
+function detectTextFromMaterialContent(content: Record<string, unknown>) {
+  const fileName = String(content.fileName || '');
+  const fileUrl = String(content.fileUrl || '');
+  const mimeType = String(content.mimeType || '').toLowerCase();
+  const ext = path.extname(fileName).toLowerCase();
+
+  if (!fileUrl) return detectTextFromFilename(fileName);
+
+  const canReadAsText = mimeType.startsWith('text/') || ['.txt', '.md', '.markdown', '.csv'].includes(ext);
+  if (!canReadAsText) return detectTextFromFilename(fileName);
+
+  try {
+    const raw = fs.readFileSync(resolveUploadFilePath(fileUrl), 'utf-8');
+    const normalized = raw.replace(/\s+/g, ' ').trim();
+    if (normalized) return normalized.slice(0, 1200);
+  } catch {
+    // ignore fallback
+  }
+
+  return detectTextFromFilename(fileName);
+}
+
+async function processMaterialRecognition(materialId: string, parentId: string) {
+  try {
+    const material = await prisma.appArtifact.findFirst({ where: { id: materialId, parentId } });
+    if (!material) return;
+
+    const content = (material.content || {}) as Record<string, unknown>;
+    const sourceType = String(content.sourceType || 'file');
+    const fileName = String(content.fileName || '未命名资料');
+    const fileUrl = String(content.fileUrl || '');
+    const mimeType = String(content.mimeType || '');
+
+    const recognized = await recognizeMaterial({
+      parentId,
+      sourceType,
+      fileName,
+      fileUrl,
+      mimeType,
+    });
+
+    const previousCost = Number(content.costUsd || 0);
+    const nextContent = {
+      ...content,
+      status: recognized.status,
+      recognitionStatus: recognized.recognitionStatus,
+      recognitionResult: recognized.result,
+      fallbackReason: recognized.fallbackReason,
+      costUsd: Number.isFinite(previousCost) ? previousCost + recognized.costUsd : recognized.costUsd,
+      recognizedAt: recognized.result.recognizedAt,
+    } as unknown as Prisma.InputJsonValue;
+
+    await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: { content: nextContent },
+    });
+  } catch {
+    const material = await prisma.appArtifact.findFirst({ where: { id: materialId, parentId } });
+    if (!material) return;
+
+    const content = (material.content || {}) as Record<string, unknown>;
+    const nextContent = {
+      ...content,
+      status: 'failed',
+      recognitionStatus: 'failed',
+      fallbackReason: 'ai_recognition_failed',
+    } as unknown as Prisma.InputJsonValue;
+
+    await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: { content: nextContent },
+    });
+  }
+}
+
+interface GenerateMaterialTaskParams {
+  materialId: string;
+  parentId: string;
+  childId: string | null;
+  title?: string;
+  category?: string;
+  difficulty?: number;
+}
+
+async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams) {
+  try {
+    const material = await prisma.appArtifact.findFirst({ where: { id: params.materialId, parentId: params.parentId } });
+    if (!material) return;
+
+    const content = (material.content || {}) as Record<string, unknown>;
+    const recognition = ((content.recognitionResult || {}) as Record<string, unknown>);
+    const categoryCandidate = normalizeCategory(params.category)
+      || normalizeCategory(String(recognition.suggestedCategory || ''))
+      || '语文';
+    const safeCategory = APP_TASK_CATEGORIES.includes(categoryCandidate as typeof APP_TASK_CATEGORIES[number])
+      ? categoryCandidate
+      : '语文';
+    const safeDifficulty = Math.max(
+      1,
+      Math.min(3, Number(params.difficulty) || Number(recognition.suggestedDifficulty) || 1)
+    );
+
+    const mediaGenerated = await generateProfessionalMedia({
+      parentId: params.parentId,
+      materialId: material.id,
+      title: params.title?.trim() || `${String(content.fileName || '学习资料')}学习任务`,
+      sourceType: String(content.sourceType || 'file'),
+      fileUrl: String(content.fileUrl || ''),
+      recognitionText: String(recognition.extractedText || ''),
+      category: safeCategory,
+      difficulty: safeDifficulty,
+    });
+
+    const task = await prisma.learningTask.create({
+      data: {
+        parentId: params.parentId,
+        childId: params.childId,
+        title: params.title?.trim() || `${String(content.fileName || '学习资料')}学习任务`,
+        description: mediaGenerated.script,
+        category: safeCategory,
+        difficulty: safeDifficulty,
+        source: 'library-generated',
+      },
+      include: { child: { select: { id: true, name: true } } },
+    });
+
+    if (task.childId) {
+      await prisma.taskProgress.upsert({
+        where: { taskId_childId: { taskId: task.id, childId: task.childId } },
+        update: {},
+        create: { taskId: task.id, childId: task.childId },
+      });
+    }
+
+    const previousCost = Number(content.costUsd || 0);
+    const nextContent = {
+      ...content,
+      status: 'task_generated',
+      mediaStatus: mediaGenerated.mediaStatus,
+      mediaOutputs: mediaGenerated.outputs,
+      mediaScript: mediaGenerated.script,
+      generatedTaskId: task.id,
+      generatedAt: new Date().toISOString(),
+      fallbackReason: mediaGenerated.fallbackReason || content.fallbackReason || null,
+      costUsd: Number.isFinite(previousCost) ? previousCost + mediaGenerated.costUsd : mediaGenerated.costUsd,
+    } as unknown as Prisma.InputJsonValue;
+
+    await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: {
+        taskId: task.id,
+        childId: params.childId,
+        content: nextContent,
+      },
+    });
+  } catch {
+    const material = await prisma.appArtifact.findFirst({ where: { id: params.materialId, parentId: params.parentId } });
+    if (!material) return;
+
+    const content = (material.content || {}) as Record<string, unknown>;
+    const nextContent = {
+      ...content,
+      status: 'failed',
+      mediaStatus: 'failed',
+      fallbackReason: String(content.fallbackReason || 'media_generation_failed'),
+    } as unknown as Prisma.InputJsonValue;
+
+    await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: { content: nextContent },
+    });
+  }
+}
+
 router.get('/library/materials', requireAppParent, async (req: Request, res: Response) => {
   const payload = getParent(req);
   if (!payload) {
@@ -650,27 +843,26 @@ router.post('/library/materials/:id/recognize', requireAppParent, writeLimiter, 
     }
 
     const content = (material.content || {}) as Record<string, unknown>;
-    const fileName = String(content.fileName || '');
-    const sourceType = String(content.sourceType || 'file');
-    const recognitionResult = {
-      sourceType,
-      extractedText: detectTextFromFilename(fileName),
-      suggestedCategory: sourceType === 'audio' ? '英语' : sourceType === 'video' ? '社会科学' : '语文',
-      suggestedDifficulty: 1,
-      recognizedAt: new Date().toISOString(),
-    };
+    const recognitionStatus = String(content.recognitionStatus || '');
+    const hasRecognitionResult = !!content.recognitionResult && typeof content.recognitionResult === 'object';
+    if (hasRecognitionResult && (recognitionStatus === 'completed' || recognitionStatus === 'fallback')) {
+      res.json(material);
+      return;
+    }
+
+    const nextContent = {
+      ...content,
+      status: 'processing',
+      recognitionStatus: 'processing',
+      fallbackReason: null,
+    } as unknown as Prisma.InputJsonValue;
 
     const updated = await prisma.appArtifact.update({
       where: { id: material.id },
-      data: {
-        content: {
-          ...content,
-          status: 'recognized',
-          recognitionResult,
-        },
-      },
+      data: { content: nextContent },
     });
 
+    void processMaterialRecognition(material.id, payload.sub);
     res.json(updated);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -710,51 +902,65 @@ router.post('/library/materials/:id/generate-task', requireAppParent, writeLimit
     }
 
     const content = (material.content || {}) as Record<string, unknown>;
-    const recognition = ((content.recognitionResult || {}) as Record<string, unknown>);
-    const categoryCandidate = normalizeCategory(category) || normalizeCategory(String(recognition.suggestedCategory || '')) || '语文';
-    const safeCategory = APP_TASK_CATEGORIES.includes(categoryCandidate as typeof APP_TASK_CATEGORIES[number])
-      ? categoryCandidate
-      : '语文';
-
-    const task = await prisma.learningTask.create({
-      data: {
-        parentId: payload.sub,
-        childId: nextChildId,
-        title: title?.trim() || `${String(content.fileName || '学习资料')}学习任务`,
-        description: `由资料《${String(content.fileName || '未命名资料')}》自动生成`,
-        category: safeCategory,
-        difficulty: Math.max(1, Math.min(3, Number(difficulty) || Number(recognition.suggestedDifficulty) || 1)),
-        source: 'library-generated',
-      },
-      include: { child: { select: { id: true, name: true } } },
-    });
-
-    if (task.childId) {
-      await prisma.taskProgress.upsert({
-        where: { taskId_childId: { taskId: task.id, childId: task.childId } },
-        update: {},
-        create: { taskId: task.id, childId: task.childId },
+    const existingTaskId = typeof material.taskId === 'string' && material.taskId.trim()
+      ? material.taskId.trim()
+      : (typeof content.generatedTaskId === 'string' && content.generatedTaskId.trim() ? content.generatedTaskId.trim() : null);
+    if (existingTaskId) {
+      const existingTask = await prisma.learningTask.findFirst({
+        where: { id: existingTaskId, parentId: payload.sub },
+        include: { child: { select: { id: true, name: true } } },
       });
+      if (existingTask) {
+        res.json(existingTask);
+        return;
+      }
     }
 
-    await prisma.appArtifact.update({
+    const nextContent = {
+      ...content,
+      status: 'processing',
+      mediaStatus: 'processing',
+      fallbackReason: null,
+    } as unknown as Prisma.InputJsonValue;
+
+    const updated = await prisma.appArtifact.update({
       where: { id: material.id },
       data: {
-        taskId: task.id,
-        content: {
-          ...content,
-          status: 'task_generated',
-          generatedTaskId: task.id,
-          generatedAt: new Date().toISOString(),
-        },
+        childId: nextChildId,
+        content: nextContent,
       },
     });
 
-    res.json(task);
+    void processMaterialTaskGeneration({
+      materialId: material.id,
+      parentId: payload.sub,
+      childId: nextChildId,
+      title,
+      category,
+      difficulty,
+    });
+
+    res.json(updated);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
   }
+});
+
+router.get('/library/materials/:id/status', requireAppParent, async (req: Request, res: Response) => {
+  const payload = getParent(req);
+  if (!payload) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const material = await prisma.appArtifact.findFirst({ where: { id: req.params.id, parentId: payload.sub } });
+  if (!material) {
+    res.status(404).json({ error: '未找到学习资料' });
+    return;
+  }
+
+  res.json(material);
 });
 
 router.get('/progress', requireAppParent, async (req: Request, res: Response) => {
@@ -783,6 +989,22 @@ router.get('/progress', requireAppParent, async (req: Request, res: Response) =>
   const submitted = progresses.filter((p) => p.status === 'submitted').length;
   res.json({ total, done, submitted, completionRate: total > 0 ? done / total : 0, list: progresses });
 });
+
+interface WeeklyRankItem {
+  childId: string;
+  childName: string;
+  points: number;
+  doneCount: number;
+  audioPlayCount: number;
+  videoPlayCount: number;
+}
+
+interface Trend7dItem {
+  date: string;
+  label: string;
+  doneCount: number;
+  learnCount: number;
+}
 
 router.get('/reports/:childId', requireAppParent, async (req: Request, res: Response) => {
   const payload = getParent(req);
@@ -822,6 +1044,13 @@ router.get('/reports/:childId', requireAppParent, async (req: Request, res: Resp
     ? scored.reduce((acc, item) => acc + Number(item.score || 0), 0) / scored.length
     : null;
 
+  const mediaStats = progresses.reduce((acc, item) => {
+    const data = parseProgressAnswerData(item.answerData);
+    acc.audioPlayCount += toNumber(data.audioPlayCount);
+    acc.videoPlayCount += toNumber(data.videoPlayCount);
+    return acc;
+  }, { audioPlayCount: 0, videoPlayCount: 0 });
+
   const categoryMap = new Map<string, { total: number; done: number }>();
   for (const item of progresses) {
     const category = item.task.category;
@@ -838,6 +1067,94 @@ router.get('/reports/:childId', requireAppParent, async (req: Request, res: Resp
     completionRate: stat.total > 0 ? stat.done / stat.total : 0,
   }));
 
+  const weekStart = new Date();
+  const weekday = weekStart.getDay();
+  const weekDiff = weekday === 0 ? 6 : weekday - 1;
+  weekStart.setDate(weekStart.getDate() - weekDiff);
+  weekStart.setHours(0, 0, 0, 0);
+
+  const weeklyRows = await prisma.taskProgress.findMany({
+    where: {
+      child: { parentId: payload.sub },
+      updatedAt: { gte: weekStart },
+    },
+    include: {
+      child: { select: { id: true, name: true } },
+    },
+    orderBy: { updatedAt: 'desc' },
+  });
+
+  const rankMap = new Map<string, WeeklyRankItem>();
+  for (const row of weeklyRows) {
+    const item = rankMap.get(row.childId) || {
+      childId: row.childId,
+      childName: row.child.name,
+      points: 0,
+      doneCount: 0,
+      audioPlayCount: 0,
+      videoPlayCount: 0,
+    };
+
+    if (row.status === 'done') {
+      item.doneCount += 1;
+      item.points += 3;
+    }
+
+    const data = parseProgressAnswerData(row.answerData);
+    const audio = toNumber(data.audioPlayCount);
+    const video = toNumber(data.videoPlayCount);
+    item.audioPlayCount += audio;
+    item.videoPlayCount += video;
+    item.points += audio + video;
+
+    rankMap.set(row.childId, item);
+  }
+
+  const weeklyRanking = Array.from(rankMap.values())
+    .sort((a, b) => b.points - a.points)
+    .slice(0, 10);
+
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const trendStart = new Date(dayStart);
+  trendStart.setDate(trendStart.getDate() - 6);
+
+  const trendRows = await prisma.taskProgress.findMany({
+    where: {
+      childId: child.id,
+      updatedAt: { gte: trendStart },
+    },
+    select: {
+      status: true,
+      updatedAt: true,
+      answerData: true,
+    },
+  });
+
+  const trendMap = new Map<string, { doneCount: number; learnCount: number }>();
+  for (let i = 0; i < 7; i += 1) {
+    const day = new Date(trendStart);
+    day.setDate(trendStart.getDate() + i);
+    const key = day.toISOString().slice(0, 10);
+    trendMap.set(key, { doneCount: 0, learnCount: 0 });
+  }
+
+  for (const row of trendRows) {
+    const key = row.updatedAt.toISOString().slice(0, 10);
+    const bucket = trendMap.get(key);
+    if (!bucket) continue;
+    if (row.status === 'done') bucket.doneCount += 1;
+    const data = parseProgressAnswerData(row.answerData);
+    bucket.learnCount += toNumber(data.audioPlayCount) + toNumber(data.videoPlayCount);
+  }
+
+  const trend7d: Trend7dItem[] = Array.from(trendMap.entries()).map(([date, value]) => ({
+    date,
+    label: `${date.slice(5, 7)}-${date.slice(8, 10)}`,
+    doneCount: value.doneCount,
+    learnCount: value.learnCount,
+  }));
+
   res.json({
     child: { id: child.id, name: child.name, gradeLevel: child.gradeLevel },
     summary: {
@@ -847,9 +1164,13 @@ router.get('/reports/:childId', requireAppParent, async (req: Request, res: Resp
       inProgress,
       completionRate: total > 0 ? done / total : 0,
       averageScore,
+      audioPlayCount: mediaStats.audioPlayCount,
+      videoPlayCount: mediaStats.videoPlayCount,
     },
     categoryStats,
     recent: progresses.slice(0, 20),
+    weeklyRanking,
+    trend7d,
   });
 });
 
@@ -878,10 +1199,34 @@ router.get('/child/:childId/today', requireAppParent, async (req: Request, res: 
     },
     include: {
       progresses: { where: { childId: child.id }, take: 1 },
+      artifacts: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { content: true },
+      },
     },
     orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
   });
-  res.json({ child: { id: child.id, name: child.name }, list });
+
+  const normalizedList = list.map((task) => {
+    const latestArtifact = task.artifacts?.[0];
+    const content = latestArtifact && typeof latestArtifact.content === 'object' && !Array.isArray(latestArtifact.content)
+      ? (latestArtifact.content as Record<string, unknown>)
+      : {};
+    const mediaOutputs = Array.isArray(content.mediaOutputs) ? content.mediaOutputs : [];
+    const audio = mediaOutputs.find((item) => item && typeof item === 'object' && (item as Record<string, unknown>).kind === 'audio');
+    const video = mediaOutputs.find((item) => item && typeof item === 'object' && (item as Record<string, unknown>).kind === 'video');
+
+    return {
+      ...task,
+      professionalMedia: {
+        audioUrl: audio && typeof (audio as Record<string, unknown>).url === 'string' ? String((audio as Record<string, unknown>).url) : null,
+        videoUrl: video && typeof (video as Record<string, unknown>).url === 'string' ? String((video as Record<string, unknown>).url) : null,
+      },
+    };
+  });
+
+  res.json({ child: { id: child.id, name: child.name }, list: normalizedList });
 });
 
 router.post('/tasks/:taskId/start', requireAppParent, writeLimiter, async (req: Request, res: Response) => {
@@ -934,19 +1279,39 @@ router.post('/tasks/:taskId/submit', requireAppParent, writeLimiter, async (req:
     res.status(404).json({ error: 'Task not found' });
     return;
   }
-  const progress = await prisma.taskProgress.upsert({
+
+  const existing = await prisma.taskProgress.findUnique({
     where: { taskId_childId: { taskId: task.id, childId: child.id } },
-    update: {
-      status: 'submitted',
-      answerData: answerData === undefined ? undefined : (answerData as object),
-      score: score === undefined ? null : Number(score),
-      submittedAt: new Date(),
-    },
-    create: {
+  });
+
+  const incomingAnswerData = answerData === undefined ? null : parseProgressAnswerData(answerData);
+  const mergedAnswerData = answerData === undefined
+    ? existing?.answerData
+    : {
+      ...parseProgressAnswerData(existing?.answerData),
+      ...incomingAnswerData,
+    };
+
+  if (existing) {
+    const progress = await prisma.taskProgress.update({
+      where: { id: existing.id },
+      data: {
+        status: existing.status === 'done' ? 'done' : 'submitted',
+        answerData: mergedAnswerData === undefined ? undefined : (mergedAnswerData as object),
+        score: score === undefined ? existing.score : Number(score),
+        submittedAt: new Date(),
+      },
+    });
+    res.json(progress);
+    return;
+  }
+
+  const progress = await prisma.taskProgress.create({
+    data: {
       taskId: task.id,
       childId: child.id,
       status: 'submitted',
-      answerData: (answerData as object) || undefined,
+      answerData: mergedAnswerData === undefined ? undefined : (mergedAnswerData as object),
       score: score === undefined ? null : Number(score),
       submittedAt: new Date(),
     },

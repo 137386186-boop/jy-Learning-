@@ -10,6 +10,7 @@ import contentsRoutes from './routes/contents';
 import replyTemplatesRoutes from './routes/reply-templates';
 import adminRoutes from './routes/admin';
 import biliExperimentRouter from './routes/bili-experiment';
+import appRoutes from './routes/app';
 import { prisma } from './lib/prisma';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -48,6 +49,7 @@ app.use('/api/contents', contentsRoutes);
 app.use('/api/reply-templates', replyTemplatesRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/bili-experiment', biliExperimentRouter);
+app.use('/api/app', appRoutes);
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
