@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
@@ -17,6 +18,15 @@ const authLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  message: { error: '操作过于频繁，请稍后再试' },
+});
+
+const loginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: '登录尝试次数过多，请 10 分钟后再试' },
 });
 
 const writeLimiter = rateLimit({
@@ -46,6 +56,30 @@ function normalizeCategory(input?: string): string | null {
 
 const APP_TASK_CATEGORIES = ['语文', '数学', '英语', '社会科学'] as const;
 const APP_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'app-library');
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_POLICY_MESSAGE = '密码至少 8 位，且需同时包含字母和数字';
+const RESET_TOKEN_BYTES = 32;
+const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
+
+function isStrongPassword(value: string): boolean {
+  const hasLetter = /[a-zA-Z]/.test(value);
+  const hasNumber = /\d/.test(value);
+  return value.length >= PASSWORD_MIN_LENGTH && hasLetter && hasNumber;
+}
+
+function hashResetToken(rawToken: string): string {
+  return crypto.createHash('sha256').update(rawToken).digest('hex');
+}
+
+function createResetToken() {
+  const token = crypto.randomBytes(RESET_TOKEN_BYTES).toString('hex');
+  return {
+    token,
+    tokenHash: hashResetToken(token),
+    expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS),
+  };
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
@@ -107,29 +141,31 @@ router.post('/auth/register', authLimiter, async (req: Request, res: Response) =
       res.status(400).json({ error: '请输入用户名和密码' });
       return;
     }
-    if (p.length < 6) {
-      res.status(400).json({ error: '密码长度至少 6 位' });
+    if (!isStrongPassword(p)) {
+      res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
       return;
     }
     const existed = await prisma.appParent.findUnique({ where: { username: u } });
     if (existed) {
-      res.status(409).json({ error: '用户名已存在' });
+      res.status(409).json({ error: '用户名已存在，请直接登录或找回密码' });
       return;
     }
     const passwordHash = await bcrypt.hash(p, 10);
-    const parent = await prisma.appParent.create({
+    await prisma.appParent.create({
       data: { username: u, passwordHash, displayName: d || u },
-      select: { id: true, username: true, displayName: true },
+      select: { id: true },
     });
-    const token = signAppParentToken({ id: parent.id, username: parent.username });
-    res.json({ token, parent });
+    res.status(201).json({
+      ok: true,
+      message: '注册成功，请使用账号密码登录',
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
   }
 });
 
-router.post('/auth/login', authLimiter, async (req: Request, res: Response) => {
+router.post('/auth/login', loginLimiter, async (req: Request, res: Response) => {
   try {
     const { username, password } = req.body as { username?: string; password?: string };
     const u = username?.trim();
@@ -150,6 +186,101 @@ router.post('/auth/login', authLimiter, async (req: Request, res: Response) => {
     }
     const token = signAppParentToken({ id: parent.id, username: parent.username });
     res.json({ token, parent: { id: parent.id, username: parent.username, displayName: parent.displayName } });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+router.post('/auth/forgot-password', authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { username } = req.body as { username?: string };
+    const u = username?.trim();
+    if (!u) {
+      res.status(400).json({ error: '请输入用户名' });
+      return;
+    }
+
+    const parent = await prisma.appParent.findUnique({ where: { username: u } });
+    if (!parent) {
+      res.json({
+        ok: true,
+        message: '若账号存在，重置指引已创建',
+      });
+      return;
+    }
+
+    const { token, tokenHash, expiresAt } = createResetToken();
+    await prisma.appPasswordResetToken.updateMany({
+      where: { parentId: parent.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    await prisma.appPasswordResetToken.create({
+      data: {
+        parentId: parent.id,
+        tokenHash,
+        expiresAt,
+      },
+    });
+
+    res.json({
+      ok: true,
+      message: '重置口令已生成，请在有效期内完成重置',
+      resetToken: token,
+      expiresAt: expiresAt.toISOString(),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+router.post('/auth/reset-password', authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { token, password } = req.body as { token?: string; password?: string };
+    const rawToken = token?.trim();
+    const nextPassword = password?.trim();
+    if (!rawToken || !nextPassword) {
+      res.status(400).json({ error: '请填写重置口令和新密码' });
+      return;
+    }
+    if (!isStrongPassword(nextPassword)) {
+      res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
+      return;
+    }
+
+    const tokenHash = hashResetToken(rawToken);
+    const record = await prisma.appPasswordResetToken.findUnique({
+      where: { tokenHash },
+      include: { parent: true },
+    });
+
+    if (!record || record.usedAt || record.expiresAt.getTime() < Date.now()) {
+      res.status(400).json({ error: '重置口令无效或已过期，请重新申请' });
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(nextPassword, 10);
+    await prisma.$transaction([
+      prisma.appParent.update({
+        where: { id: record.parentId },
+        data: { passwordHash },
+      }),
+      prisma.appPasswordResetToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+      prisma.appPasswordResetToken.updateMany({
+        where: {
+          parentId: record.parentId,
+          id: { not: record.id },
+          usedAt: null,
+        },
+        data: { usedAt: new Date() },
+      }),
+    ]);
+
+    res.json({ ok: true, message: '密码已重置，请重新登录' });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });

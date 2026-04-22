@@ -11,3 +11,38 @@ body {
   margin: 0 auto;
   padding: 24px 16px 40px;
 }
+
+.material-list-item {
+  align-items: flex-start;
+  padding: 14px 0;
+}
+
+.material-list-item .ant-list-item-action {
+  margin-inline-start: 0;
+  width: 100%;
+}
+
+.material-list-item .ant-list-item-action > li {
+  width: 100%;
+}
+
+.material-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.material-meta-row {
+  display: flex;
+  align-items: center;
+}
+
+.danger-popconfirm .ant-popover-inner-content {
+  font-size: 14px;
+}
+
+.danger-popconfirm .ant-popconfirm-title {
+  font-size: 16px;
+  font-weight: 600;
+}
