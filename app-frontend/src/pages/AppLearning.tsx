@@ -96,14 +96,10 @@ function parseMaterialContent(raw: unknown) {
     videoUrl: videoOutput && typeof (videoOutput as Record<string, unknown>).url === 'string'
       ? String((videoOutput as Record<string, unknown>).url)
       : '',
+    scheduledDate: typeof data.scheduledDate === 'string' ? data.scheduledDate : '',
+    completedAt: typeof data.completedAt === 'string' ? data.completedAt : '',
   };
 }
-
-const TASK_STATUS_META: Record<TaskItem['status'], { label: string; color: string }> = {
-  draft: { label: '草稿', color: 'default' },
-  active: { label: '进行中', color: 'processing' },
-  archived: { label: '已归档', color: 'default' },
-};
 
 const GRADE_LEVEL_LABEL: Record<string, string> = {
   pre_k: '学前',
@@ -114,12 +110,6 @@ const GRADE_LEVEL_LABEL: Record<string, string> = {
 function getGradeLevelLabel(value?: string | null) {
   if (!value) return '';
   return GRADE_LEVEL_LABEL[value] || value;
-}
-
-function getDifficultyLabel(level: number) {
-  if (level === 1) return '入门';
-  if (level === 2) return '基础';
-  return '提升';
 }
 
 function getMaterialStatusMeta(status: string) {
@@ -262,7 +252,6 @@ export default function AppLearning() {
   const [resetSubmitting, setResetSubmitting] = useState(false);
   const [latestResetToken, setLatestResetToken] = useState('');
   const [childSubmitting, setChildSubmitting] = useState(false);
-  const [taskSubmitting, setTaskSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [deletingChildId, setDeletingChildId] = useState<string | null>(null);
   const [materialBusyId, setMaterialBusyId] = useState<string | null>(null);
@@ -280,15 +269,26 @@ export default function AppLearning() {
   const [deletingMaterialId, setDeletingMaterialId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
-  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [createMode, setCreateMode] = useState<'upload' | 'paste'>('upload');
+
+  // —— 日历看板 & 安排日期相关 ——
+  const todayStr = dayjs().format('YYYY-MM-DD');
+  const computeWeekStart = (anchor: dayjs.Dayjs) => {
+    const day = anchor.day(); // 0=Sun..6=Sat
+    return anchor.subtract(day === 0 ? 6 : day - 1, 'day').format('YYYY-MM-DD');
+  };
+  const [uploadScheduledDate, setUploadScheduledDate] = useState<string>(todayStr);
+  const [boardWeekStart, setBoardWeekStart] = useState<string>(() => computeWeekStart(dayjs()));
+  const [boardChildFilter, setBoardChildFilter] = useState<string | undefined>(undefined);
+  const [scheduleBusyId, setScheduleBusyId] = useState<string | null>(null);
+  const [completeBusyId, setCompleteBusyId] = useState<string | null>(null);
+  const [showChildForm, setShowChildForm] = useState(false);
 
   const [loginForm] = Form.useForm();
   const [forgotForm] = Form.useForm();
   const [registerForm] = Form.useForm();
   const [resetForm] = Form.useForm();
   const [childForm] = Form.useForm();
-  const [taskForm] = Form.useForm();
 
   const registerPassword = Form.useWatch('password', registerForm) || '';
   const resetPassword = Form.useWatch('password', resetForm) || '';
@@ -546,69 +546,6 @@ export default function AppLearning() {
     }
   };
 
-  const onCreateTask = async (values: {
-    title: string;
-    description?: string;
-    materialId?: string;
-    category: string;
-    difficulty?: number;
-    childId?: string;
-    dueDate?: string;
-  }) => {
-    taskForm.setFields([
-      { name: 'title', errors: [] },
-      { name: 'description', errors: [] },
-      { name: 'materialId', errors: [] },
-      { name: 'category', errors: [] },
-    ]);
-    const payload = {
-      ...values,
-      description: values.description?.trim() || undefined,
-      materialId: values.materialId?.trim() || undefined,
-    };
-    setTaskSubmitting(true);
-    try {
-      const res = await appFetch(`${APP_API_BASE}/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await parseApiResponse(res);
-      if (!res.ok) {
-        applyFieldErrors(taskForm, data);
-        message.error(getApiErrorMessage(data, '创建任务失败', res.status));
-        return;
-      }
-      message.success('任务已创建');
-      taskForm.resetFields();
-      await reloadAll();
-    } catch {
-      message.error('创建任务失败，请稍后重试');
-    } finally {
-      setTaskSubmitting(false);
-    }
-  };
-
-  const onDeleteTask = async (taskId: string) => {
-    setDeletingTaskId(taskId);
-    try {
-      const res = await appFetch(`${APP_API_BASE}/tasks/${taskId}`, {
-        method: 'DELETE',
-      });
-      const data = await parseApiResponse(res);
-      if (!res.ok) {
-        message.error(getApiErrorMessage(data, '删除任务失败', res.status));
-        return;
-      }
-      message.success('任务已删除');
-      await reloadAll();
-    } catch {
-      message.error('删除任务失败，请稍后重试');
-    } finally {
-      setDeletingTaskId(null);
-    }
-  };
-
   const onDeleteChild = async (childId: string) => {
     setDeletingChildId(childId);
     try {
@@ -688,6 +625,9 @@ export default function AppLearning() {
       const formData = new FormData();
       formData.append('file', fileToUpload);
       if (uploadChildId) formData.append('childId', uploadChildId);
+      if (uploadScheduledDate && /^\d{4}-\d{2}-\d{2}$/.test(uploadScheduledDate)) {
+        formData.append('scheduledDate', uploadScheduledDate);
+      }
 
       const uploadRes = await appUpload(
         `${APP_API_BASE}/library/materials`,
@@ -765,6 +705,36 @@ export default function AppLearning() {
         setUploadPercent(0);
         setUploadStage('');
       }, 1500);
+    }
+  };
+
+  const onUpdateMaterial = async (
+    materialId: string,
+    patch: { scheduledDate?: string | null; childId?: string | null; completed?: boolean },
+    busyKind: 'schedule' | 'complete' = 'schedule'
+  ) => {
+    if (busyKind === 'schedule') setScheduleBusyId(materialId);
+    if (busyKind === 'complete') setCompleteBusyId(materialId);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/library/materials/${materialId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await parseApiResponse(res);
+      if (!res.ok) {
+        message.error(getApiErrorMessage(data, '更新失败', res.status));
+        return false;
+      }
+      // 本地立即合并，避免等 reload
+      setMaterials((prev) => prev.map((m) => (m.id === materialId ? (data as unknown as MaterialItem) : m)));
+      return true;
+    } catch {
+      message.error('更新失败，请稍后重试');
+      return false;
+    } finally {
+      if (busyKind === 'schedule') setScheduleBusyId(null);
+      if (busyKind === 'complete') setCompleteBusyId(null);
     }
   };
 
@@ -903,22 +873,134 @@ export default function AppLearning() {
       return;
     }
 
+    // 先停掉上一轮朗读（如果有），并标记其 stopped，避免遗留回调把新一轮打断
+    const prevCancel = (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel;
+    if (typeof prevCancel === 'function') {
+      try { prevCancel(); } catch { /* ignore */ }
+    }
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(content);
-    utterance.lang = 'zh-CN';
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
 
-    message.loading({ content: '正在生成并播放音频…', key: `speak-${materialId}` });
-
-    utterance.onend = () => {
-      message.success({ content: '音频播放完成', key: `speak-${materialId}` });
+    // 预热 voices：Chrome 首次冷启动若 voices 未就绪，speak 会静默失败
+    const ensureVoicesReady = async () => {
+      const list = window.speechSynthesis.getVoices();
+      if (list && list.length) return;
+      await new Promise<void>((resolve) => {
+        const start = Date.now();
+        const timer = window.setInterval(() => {
+          if (window.speechSynthesis.getVoices().length || Date.now() - start > 1500) {
+            window.clearInterval(timer);
+            resolve();
+          }
+        }, 100);
+      });
     };
-    utterance.onerror = () => {
-      message.error({ content: '音频生成失败，请重试', key: `speak-${materialId}` });
+    await ensureVoicesReady();
+
+    // 选一个中文 voice（如无则让浏览器自行选）
+    const voices = window.speechSynthesis.getVoices();
+    const zhVoice =
+      voices.find((v) => /zh(-|_)?CN/i.test(v.lang)) ||
+      voices.find((v) => /^zh/i.test(v.lang)) ||
+      null;
+
+    // 分段：先按句号/问号/分号/换行切，再把长句限制在 60 字内（控制单段时长 < 12s，远低于 Chrome 15s 截断阈值）
+    const SEGMENT_MAX = 60;
+    const segments = content
+      .replace(/\r/g, '')
+      .split(/(?<=[。！？!?；;\n])/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .flatMap((s) => {
+        if (s.length <= SEGMENT_MAX) return [s];
+        const parts: string[] = [];
+        // 优先在逗号/顿号切
+        const subs = s.split(/(?<=[，、,])/);
+        let buf = '';
+        for (const sub of subs) {
+          if ((buf + sub).length > SEGMENT_MAX) {
+            if (buf) parts.push(buf);
+            // 单子句仍过长则硬切
+            if (sub.length > SEGMENT_MAX) {
+              for (let i = 0; i < sub.length; i += SEGMENT_MAX) parts.push(sub.slice(i, i + SEGMENT_MAX));
+              buf = '';
+            } else {
+              buf = sub;
+            }
+          } else {
+            buf += sub;
+          }
+        }
+        if (buf) parts.push(buf);
+        return parts;
+      });
+
+    if (!segments.length) segments.push(content);
+
+    message.loading({ content: `🔊 正在朗读，全文约 ${content.length} 字（共 ${segments.length} 段）…`, key: `speak-${materialId}` });
+
+    let idx = 0;
+    let stopped = false;
+    let advanced = false;
+    let watchdog: number | null = null;
+    const clearWatchdog = () => {
+      if (watchdog !== null) {
+        window.clearTimeout(watchdog);
+        watchdog = null;
+      }
     };
 
-    window.speechSynthesis.speak(utterance);
+    const advance = (delayMs: number) => {
+      if (advanced) return;
+      advanced = true;
+      clearWatchdog();
+      idx += 1;
+      window.setTimeout(speakNext, delayMs);
+    };
+
+    function speakNext() {
+      if (stopped) return;
+      if (idx >= segments.length) {
+        message.success({ content: `✅ 朗读完成（共 ${segments.length} 段）`, key: `speak-${materialId}` });
+        return;
+      }
+      advanced = false;
+      const segText = segments[idx];
+      const u = new SpeechSynthesisUtterance(segText);
+      u.lang = 'zh-CN';
+      if (zhVoice) u.voice = zhVoice;
+      u.rate = 0.95;
+      u.pitch = 1;
+      u.onend = () => advance(80);
+      u.onerror = (e) => {
+        // 关键 fix：interrupted / canceled 不再视作"用户停止"。
+        // 用户停止走显式 __jyLastTtsCancel → stopped=true 路径；其余一律继续下一段。
+        if (stopped) return;
+        // 留点时间让引擎复位，避免连环 interrupted
+        advance(e?.error === 'interrupted' || e?.error === 'canceled' ? 300 : 200);
+      };
+
+      // Watchdog：单段最多给 30s，超过则强制推进，防止 onend/onerror 都不来卡死
+      const estimatedMs = Math.max(8000, segText.length * 220);
+      watchdog = window.setTimeout(() => {
+        if (stopped) return;
+        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+        advance(200);
+      }, Math.min(estimatedMs + 5000, 30000));
+
+      try {
+        window.speechSynthesis.speak(u);
+      } catch {
+        advance(200);
+      }
+    }
+
+    speakNext();
+
+    (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel = () => {
+      stopped = true;
+      clearWatchdog();
+      try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+    };
   };
 
   const onGenerateMaterialVideo = async (
@@ -971,17 +1053,21 @@ export default function AppLearning() {
     }
     const durationMs = sceneStarts[sceneStarts.length - 1] + sceneDurations[sceneDurations.length - 1];
 
-    // ---- 视觉资产 ----
-    const characters = ['👩‍🏫', '🧑‍🎨', '🦊', '🐱', '🐻', '🐯', '🐼', '🦁', '🐧', '🐰', '🦝', '🐨'];
-    const character = characters[Math.floor(Math.random() * characters.length)];
-    const decoEmojis = ['⭐', '✨', '💫', '❤️', '🎈', '🌟', '🌈', '🍀', '🌸', '🌼', '📚', '💡', '🎵', '🎨'];
+    // ---- 双角色 ----
+    const animals = ['🦊', '🐱', '🐻', '🐯', '🐼', '🐰', '🐨', '🦁', '🐧', '🐸', '🐵', '🐶'];
+    const pickIdx = Math.floor(Math.random() * animals.length);
+    const charA = animals[pickIdx];
+    let charB = animals[(pickIdx + 3 + Math.floor(Math.random() * 5)) % animals.length];
+    if (charB === charA) charB = animals[(pickIdx + 1) % animals.length];
+
+    const propPool = ['📚', '🍎', '🌙', '⭐', '🎈', '🌈', '🎵', '💡', '🌸', '🍀', '🎁', '🚀', '✏️', '🎨', '🌟', '❤️', '☀️', '🌳', '⛵', '🏆'];
     const themes = [
-      { bg1: '#fff0f6', bg2: '#ffe7ba', accent: '#eb2f96', soft: 'rgba(255,133,162,0.18)' },
-      { bg1: '#e6f4ff', bg2: '#f6ffed', accent: '#1677ff', soft: 'rgba(22,119,255,0.16)' },
-      { bg1: '#f9f0ff', bg2: '#fff7e6', accent: '#722ed1', soft: 'rgba(114,46,209,0.18)' },
-      { bg1: '#e6fffb', bg2: '#fff0f6', accent: '#13c2c2', soft: 'rgba(19,194,194,0.18)' },
-      { bg1: '#fff7e6', bg2: '#fff0f6', accent: '#fa8c16', soft: 'rgba(250,140,22,0.18)' },
-      { bg1: '#f6ffed', bg2: '#e6f4ff', accent: '#52c41a', soft: 'rgba(82,196,26,0.18)' },
+      { bg1: '#a6d9ff', bg2: '#d6efff', ground: '#7cc28b', accent: '#1d6fff', soft: 'rgba(22,119,255,0.18)' },
+      { bg1: '#ffd6e7', bg2: '#fff0f6', ground: '#ffb38a', accent: '#eb2f96', soft: 'rgba(255,133,162,0.2)' },
+      { bg1: '#ffe2a8', bg2: '#fff7d6', ground: '#9bd07a', accent: '#fa8c16', soft: 'rgba(250,140,22,0.2)' },
+      { bg1: '#d3b3ff', bg2: '#f0e1ff', ground: '#9fb6ff', accent: '#722ed1', soft: 'rgba(114,46,209,0.22)' },
+      { bg1: '#a8eddc', bg2: '#e8fffb', ground: '#8bd5a8', accent: '#13c2c2', soft: 'rgba(19,194,194,0.2)' },
+      { bg1: '#ffd4d4', bg2: '#fff0f0', ground: '#ffb38a', accent: '#ff4d4f', soft: 'rgba(255,77,79,0.2)' },
     ];
 
     const roundRect = (cx: number, cy: number, w: number, h: number, r: number) => {
@@ -1080,30 +1166,81 @@ export default function AppLearning() {
         const theme = themes[sceneIdx % themes.length];
         const t = elapsed / 1000;
 
-        // 1. 背景径向渐变
-        const grad = ctx.createRadialGradient(
-          canvas.width / 2,
-          canvas.height / 2,
-          80,
-          canvas.width / 2,
-          canvas.height / 2,
-          Math.max(canvas.width, canvas.height) * 0.75
-        );
-        grad.addColorStop(0, theme.bg1);
-        grad.addColorStop(1, theme.bg2);
-        ctx.fillStyle = grad;
+        // 1. 天空背景径向渐变（上半部天空，下半部草地，营造舞台感）
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        skyGrad.addColorStop(0, theme.bg1);
+        skyGrad.addColorStop(0.7, theme.bg2);
+        ctx.fillStyle = skyGrad;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // 2. 漂浮装饰 emoji
-        ctx.font = `${isPortrait ? 30 : 36}px sans-serif`;
-        ctx.globalAlpha = 0.6;
-        for (let i = 0; i < 14; i += 1) {
-          const e = decoEmojis[(i + sceneIdx) % decoEmojis.length];
-          const baseX = ((i * 137) % (canvas.width - 80)) + 40;
-          const baseY = ((i * 211) % (canvas.height - 260)) + 110;
-          const px = baseX + Math.sin(t * 0.7 + i * 0.9) * 20;
-          const py = baseY + Math.cos(t * 0.6 + i * 0.7) * 16;
+        // 1.1 远处太阳/月亮（缓慢飘动）
+        const sunX = canvas.width - (isPortrait ? 110 : 160) + Math.sin(t * 0.3) * 14;
+        const sunY = (isPortrait ? 180 : 160) + Math.cos(t * 0.3) * 8;
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, isPortrait ? 50 : 64, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = theme.accent;
+        ctx.globalAlpha = 0.18;
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, isPortrait ? 32 : 40, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // 1.2 远山（多层）
+        const hillBaseY = canvas.height * (isPortrait ? 0.62 : 0.58);
+        for (let h = 0; h < 3; h += 1) {
+          ctx.fillStyle = h === 0 ? 'rgba(255,255,255,0.28)' : h === 1 ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.12)';
+          ctx.beginPath();
+          ctx.moveTo(0, hillBaseY + h * 18);
+          const peaks = 5 + h;
+          for (let p = 0; p <= peaks; p += 1) {
+            const px = (canvas.width / peaks) * p;
+            const py = hillBaseY + h * 18 - (40 + h * 12) * Math.abs(Math.sin(p * 1.3 + h * 0.7));
+            ctx.lineTo(px, py);
+          }
+          ctx.lineTo(canvas.width, canvas.height);
+          ctx.lineTo(0, canvas.height);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        // 1.3 草地舞台
+        const groundY = canvas.height * (isPortrait ? 0.72 : 0.7);
+        const groundGrad = ctx.createLinearGradient(0, groundY, 0, canvas.height);
+        groundGrad.addColorStop(0, theme.ground);
+        groundGrad.addColorStop(1, theme.bg2);
+        ctx.fillStyle = groundGrad;
+        ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+        // 草地花朵
+        ctx.font = `${isPortrait ? 22 : 26}px sans-serif`;
+        for (let f = 0; f < 8; f += 1) {
+          const fx = ((f * 173 + sceneIdx * 37) % (canvas.width - 60)) + 30;
+          const fy = groundY + 24 + ((f * 53) % (canvas.height - groundY - 60));
+          ctx.fillText(f % 3 === 0 ? '🌼' : f % 3 === 1 ? '🌸' : '🍀', fx, fy);
+        }
+
+        // 2. 漂浮道具（云朵 + 道具 emoji）
+        ctx.font = `${isPortrait ? 28 : 34}px sans-serif`;
+        ctx.globalAlpha = 0.85;
+        for (let i = 0; i < 10; i += 1) {
+          const e = propPool[(i + sceneIdx * 3) % propPool.length];
+          const baseX = ((i * 157) % (canvas.width - 80)) + 40;
+          const baseY = ((i * 197) % (groundY - 200)) + 130;
+          const px = baseX + Math.sin(t * 0.6 + i * 0.9) * 22;
+          const py = baseY + Math.cos(t * 0.5 + i * 0.7) * 14;
           ctx.fillText(e, px, py);
+        }
+        // 云朵
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        for (let c = 0; c < 3; c += 1) {
+          const cx = ((t * 18 + c * 360) % (canvas.width + 200)) - 100;
+          const cy = 60 + c * 50 + Math.sin(t * 0.4 + c) * 6;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+          ctx.arc(cx + 26, cy + 4, 22, 0, Math.PI * 2);
+          ctx.arc(cx - 24, cy + 6, 20, 0, Math.PI * 2);
+          ctx.fill();
         }
         ctx.globalAlpha = 1;
 
@@ -1129,33 +1266,60 @@ export default function AppLearning() {
         }
         ctx.globalAlpha = 1;
 
-        // 5. 主角 emoji（左侧，呼吸+张口动画）
-        const charSize = isPortrait ? 190 : 220;
-        const charBaseX = isPortrait ? 90 : 150;
-        const charBaseY = isPortrait ? canvas.height / 2 + 120 : canvas.height / 2 + 80;
-        const breathe = Math.sin(t * 2.2) * 6;
-        const mouthScale = 1 + Math.abs(Math.sin(t * 9)) * 0.05;
-        ctx.save();
-        ctx.translate(charBaseX, charBaseY + breathe);
-        ctx.scale(mouthScale, mouthScale);
-        ctx.font = `${charSize}px sans-serif`;
-        ctx.textBaseline = 'middle';
-        ctx.fillText(character, 0, 0);
-        ctx.restore();
-        ctx.textBaseline = 'alphabetic';
+        // 5. 双角色：左侧 charA、右侧 charB，按场景轮流"说话"
+        const charSize = isPortrait ? 180 : 210;
+        const groundLine = groundY + (isPortrait ? 36 : 48);
+        const charAX = isPortrait ? canvas.width * 0.26 : canvas.width * 0.22;
+        const charBX = isPortrait ? canvas.width * 0.74 : canvas.width * 0.78;
+        const speakerIsA = sceneIdx % 2 === 0;
+        const drawChar = (emoji: string, x: number, isSpeaker: boolean, flip: boolean) => {
+          const breathe = Math.sin(t * 2.2 + (isSpeaker ? 0 : Math.PI)) * (isSpeaker ? 8 : 4);
+          // 张口：仅说话的角色嘴部张合（垂直缩放）
+          const speakMouth = isSpeaker ? 1 + Math.abs(Math.sin(t * 11)) * 0.08 : 1;
+          // 轻微左右晃动（说话者更明显）
+          const sway = Math.sin(t * 1.8 + (isSpeaker ? 0 : Math.PI / 2)) * (isSpeaker ? 8 : 3);
+          // 影子
+          ctx.fillStyle = 'rgba(0,0,0,0.18)';
+          ctx.beginPath();
+          ctx.ellipse(x, groundLine + charSize * 0.42, charSize * 0.34, charSize * 0.08, 0, 0, Math.PI * 2);
+          ctx.fill();
 
-        // 6. 对白气泡
-        const bubbleX = charBaseX + charSize * 0.85;
-        const bubbleY = isPortrait ? canvas.height / 2 - 240 : canvas.height / 2 - 160;
-        const bubbleW = canvas.width - bubbleX - (isPortrait ? 30 : 70);
-        const bubbleH = isPortrait ? 380 : 300;
+          ctx.save();
+          ctx.translate(x + sway, groundLine + breathe);
+          if (flip) ctx.scale(-1, 1);
+          ctx.scale(1, speakMouth);
+          ctx.font = `${charSize}px sans-serif`;
+          ctx.textBaseline = 'middle';
+          ctx.textAlign = 'center';
+          ctx.fillText(emoji, 0, 0);
+          ctx.restore();
+          ctx.textBaseline = 'alphabetic';
+          ctx.textAlign = 'start';
 
-        // 阴影
+          // 说话者头顶小音符
+          if (isSpeaker) {
+            ctx.globalAlpha = 0.7 + Math.sin(t * 4) * 0.3;
+            ctx.font = `${isPortrait ? 28 : 34}px sans-serif`;
+            ctx.fillText('🎵', x + charSize * 0.35, groundLine + breathe - charSize * 0.55 + Math.sin(t * 3) * 4);
+            ctx.globalAlpha = 1;
+          }
+        };
+        drawChar(charA, charAX, speakerIsA, false);
+        drawChar(charB, charBX, !speakerIsA, true);
+
+        // 6. 对白气泡（指向当前说话者）
+        const speakerX = speakerIsA ? charAX : charBX;
+        const bubbleW = isPortrait ? canvas.width - 80 : canvas.width * 0.62;
+        const bubbleH = isPortrait ? 240 : 220;
+        const bubbleX = (canvas.width - bubbleW) / 2;
+        const bubbleY = isPortrait ? canvas.height * 0.18 : canvas.height * 0.2;
+
+        // 气泡阴影
         ctx.shadowColor = theme.soft;
         ctx.shadowBlur = 24;
         ctx.shadowOffsetY = 8;
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
-        roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 26);
+        ctx.fillStyle = 'rgba(255,255,255,0.97)';
+        roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 28);
         ctx.fill();
         ctx.shadowColor = 'transparent';
         ctx.shadowBlur = 0;
@@ -1163,46 +1327,53 @@ export default function AppLearning() {
 
         ctx.strokeStyle = theme.accent;
         ctx.lineWidth = 3;
-        roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 26);
+        roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 28);
         ctx.stroke();
 
-        // 气泡指向角色的三角
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        // 气泡指向说话者的三角
+        const tailBaseX = Math.max(bubbleX + 40, Math.min(bubbleX + bubbleW - 40, speakerX));
+        const tailDirL = tailBaseX - 22;
+        const tailDirR = tailBaseX + 22;
+        const tailTipY = bubbleY + bubbleH + 30;
+        ctx.fillStyle = 'rgba(255,255,255,0.97)';
         ctx.beginPath();
-        ctx.moveTo(bubbleX, bubbleY + 90);
-        ctx.lineTo(bubbleX - 26, bubbleY + 124);
-        ctx.lineTo(bubbleX, bubbleY + 158);
+        ctx.moveTo(tailDirL, bubbleY + bubbleH);
+        ctx.lineTo(tailBaseX, tailTipY);
+        ctx.lineTo(tailDirR, bubbleY + bubbleH);
         ctx.closePath();
         ctx.fill();
         ctx.strokeStyle = theme.accent;
         ctx.beginPath();
-        ctx.moveTo(bubbleX, bubbleY + 90);
-        ctx.lineTo(bubbleX - 26, bubbleY + 124);
-        ctx.lineTo(bubbleX, bubbleY + 158);
+        ctx.moveTo(tailDirL, bubbleY + bubbleH);
+        ctx.lineTo(tailBaseX, tailTipY);
+        ctx.lineTo(tailDirR, bubbleY + bubbleH);
         ctx.stroke();
+        // 用白色盖住气泡下边在三角内的那一段，让连接更平滑
+        ctx.fillStyle = 'rgba(255,255,255,0.97)';
+        ctx.fillRect(tailDirL + 1, bubbleY + bubbleH - 2, tailDirR - tailDirL - 2, 4);
 
         // 气泡内文本（逐字显现）
         const sentence = scenes[sceneIdx] || '';
-        const maxCharsPerLine = isPortrait ? 11 : 16;
+        const maxCharsPerLine = isPortrait ? 13 : 18;
         const wrapped: string[] = [];
         for (let i = 0; i < sentence.length; i += maxCharsPerLine) {
           wrapped.push(sentence.slice(i, i + maxCharsPerLine));
         }
         const reveal = Math.min(1, sceneProgress * 1.6);
         const charsToShow = Math.ceil(sentence.length * reveal);
-        const fontSize = isPortrait ? 36 : 42;
+        const fontSize = isPortrait ? 32 : 38;
         ctx.font = `bold ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
         ctx.fillStyle = '#262626';
         let shown = 0;
-        let lineY = bubbleY + 80;
+        let lineY = bubbleY + 60;
         for (const line of wrapped) {
           if (shown >= charsToShow) break;
           const lineCharCount = Math.min(line.length, charsToShow - shown);
           const piece = line.slice(0, lineCharCount);
-          ctx.fillText(piece, bubbleX + 32, lineY);
+          ctx.fillText(piece, bubbleX + 30, lineY);
           shown += lineCharCount;
-          lineY += fontSize + 18;
-          if (lineY > bubbleY + bubbleH - 30) break;
+          lineY += fontSize + 14;
+          if (lineY > bubbleY + bubbleH - 24) break;
         }
 
         // 7. 底部章节序号 + 提示
@@ -1495,228 +1666,246 @@ export default function AppLearning() {
               <Typography.Title level={4} style={{ margin: 0 }}>{materials.length}</Typography.Title>
             </Card>
           </div>
-          {children.length === 0 && tasks.length === 0 ? (
+          {children.length === 0 && materials.length === 0 ? (
             <Alert
               showIcon
               type="info"
-              message="还没有学习数据，先从这三步开始"
-              description="先新增孩子档案，再创建任务，最后进入“今日任务”开始学习。"
+              message="还没有学习数据，从这两步开始"
+              description="① 添加我的孩子（一张卡片即可） ② 在下方音视频工坊上传文档/粘贴文本，安排到某一天，就会出现在「📅 本周学习计划」对应的日期里。"
             />
           ) : null}
         </Space>
       </Card>
 
-      <Card title="孩子档案管理" className="app-section-card section-children">
+      {/* —— 我的孩子（精简版）—— */}
+      <Card title="👶 我的孩子" className="app-section-card section-children">
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Form layout="inline" form={childForm} onFinish={onCreateChild}>
-            <Form.Item name="name" rules={[{ required: true, message: '请输入孩子姓名' }]}>
-              <Input placeholder="孩子姓名" />
-            </Form.Item>
-            <Form.Item name="gradeLevel">
-              <Select
-                placeholder="年级阶段"
-                style={{ width: 160 }}
-                getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                options={[
-                { label: '学前', value: 'pre_k' },
-                { label: '幼儿园', value: 'kindergarten' },
-                { label: '幼升小', value: 'primary_prep' },
-              ]} />
-            </Form.Item>
-            <Form.Item>
-              <Button type="primary" htmlType="submit" loading={childSubmitting} disabled={childSubmitting}>新增孩子</Button>
-            </Form.Item>
-          </Form>
-
-          <List
-            dataSource={children}
-            locale={{ emptyText: '暂无孩子档案' }}
-            renderItem={(item) => (
-              <List.Item className="list-item-soft"
-                actions={[
-                  <Link key="today" to={`/child/${item.id}/today`}>今日任务</Link>,
-                  <Link key="report" to={`/reports/${item.id}`}>学习报告</Link>,
-                  <Popconfirm
-                    key="delete"
-                    title="确认删除该孩子档案？"
-                    description="此操作不可恢复：该孩子的任务与学习进度会一起删除。"
-                    okText="确认删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                    overlayClassName="danger-popconfirm"
-                    onConfirm={() => onDeleteChild(item.id)}
-                  >
-                    <Button
-                      danger
-                      type="text"
-                      size="small"
-                      loading={deletingChildId === item.id}
-                      disabled={deletingChildId !== null && deletingChildId !== item.id}
-                    >
-                      删除
-                    </Button>
-                  </Popconfirm>,
-                ]}
-              >
-                <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                  <Space wrap>
-                    <Typography.Text strong>{item.name}</Typography.Text>
-                    {item.gradeLevel && <Tag className="grade-tag">{getGradeLevelLabel(item.gradeLevel)}</Tag>}
-                    {item.birthDate && <Typography.Text type="secondary">{dayjs(item.birthDate).format('YYYY-MM-DD')}</Typography.Text>}
-                  </Space>
-                  <Space size={8} wrap>
-                    <Tag color={((item.todayTaskCount ?? 0) > 0 ? 'orange' : 'default')}>今日任务 {(item.todayTaskCount ?? 0)} 条</Tag>
-                    <Tag color={((item.weeklyDoneCount ?? 0) > 0 ? 'green' : 'default')}>本周完成 {(item.weeklyDoneCount ?? 0)} 条</Tag>
-                    <Tag>
-                      最近学习 {item.latestLearningAt ? dayjs(item.latestLearningAt).format('MM-DD HH:mm') : '暂无'}
-                    </Tag>
-                  </Space>
-                </Space>
-              </List.Item>
-            )}
-          />
-        </Space>
-      </Card>
-
-      <Card title="学习任务管理" className="app-section-card section-tasks">
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Form layout="inline" form={taskForm} onFinish={onCreateTask}>
-            <Form.Item name="title" rules={[{ required: true, message: '请输入任务标题' }]}>
-              <Input placeholder="任务标题" />
-            </Form.Item>
-            <Form.Item
-              name="description"
-              rules={[
-                {
-                  validator(_, value) {
-                    const materialId = String(taskForm.getFieldValue('materialId') || '').trim();
-                    const description = String(value || '').trim();
-                    if (description || materialId) {
-                      return Promise.resolve();
-                    }
-                    return Promise.reject(new Error('请填写任务说明或关联学习资料'));
-                  },
-                },
-              ]}
+          {children.length === 0 || showChildForm ? (
+            <Form
+              layout="inline"
+              form={childForm}
+              onFinish={async (values) => {
+                await onCreateChild(values);
+                setShowChildForm(false);
+              }}
             >
-              <Input placeholder="任务说明（与资料二选一）" style={{ width: 220 }} />
-            </Form.Item>
-            <Form.Item
-              name="materialId"
-              dependencies={['description']}
-              rules={[
-                {
-                  validator(_, value) {
-                    const materialId = String(value || '').trim();
-                    const description = String(taskForm.getFieldValue('description') || '').trim();
-                    if (description || materialId) {
-                      return Promise.resolve();
-                    }
-                    return Promise.reject(new Error('请填写任务说明或关联学习资料'));
-                  },
-                },
-              ]}
-            >
-              <Select
-                allowClear
-                showSearch
-                placeholder="关联学习资料（与说明二选一）"
-                style={{ width: 240 }}
-                getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                options={materials.map((m) => {
-                  const parsed = parseMaterialContent(m.content);
-                  return {
-                    label: parsed.fileName,
-                    value: m.id,
-                  };
-                })}
-              />
-            </Form.Item>
-            <Form.Item name="category" rules={[{ required: true, message: '请选择任务分类' }]}>
-              <Select
-                placeholder="任务分类"
-                style={{ width: 140 }}
-                getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                options={[
-                  { label: '语文', value: '语文' },
-                  { label: '数学', value: '数学' },
-                  { label: '英语', value: '英语' },
-                  { label: '社会科学', value: '社会科学' },
-                ]}
-              />
-            </Form.Item>
-            <Form.Item name="difficulty">
-              <Select
-                placeholder="难度"
-                style={{ width: 160 }}
-                getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                options={[
-                  { label: '入门', value: 1 },
-                  { label: '基础', value: 2 },
-                  { label: '提升', value: 3 },
-                ]}
-              />
-            </Form.Item>
-            <Form.Item name="childId">
-              <Select
-                allowClear
-                placeholder="分配给孩子"
-                style={{ width: 180 }}
-                getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                options={children.map((c) => ({ label: c.name, value: c.id }))}
-              />
-            </Form.Item>
-            <Form.Item>
-              <Button type="primary" htmlType="submit" loading={taskSubmitting} disabled={taskSubmitting}>新增任务</Button>
-            </Form.Item>
-          </Form>
-
-          <List
-            dataSource={tasks}
-            locale={{ emptyText: '暂无任务' }}
-            renderItem={(item) => {
-              const statusMeta = TASK_STATUS_META[item.status];
-              return (
-                <List.Item
-                  className="list-item-soft"
-                  actions={[
-                    <Popconfirm
-                      key="delete"
-                      title="确认删除该任务？"
-                      description="该任务的进度记录会一并删除，不可恢复。"
-                      okText="删除"
-                      cancelText="取消"
-                      okButtonProps={{ danger: true }}
-                      onConfirm={() => onDeleteTask(item.id)}
-                    >
-                      <Button
-                        danger
-                        type="text"
-                        size="small"
-                        loading={deletingTaskId === item.id}
-                        disabled={deletingTaskId !== null && deletingTaskId !== item.id}
-                      >
-                        🗑️ 删除
-                      </Button>
-                    </Popconfirm>,
+              <Form.Item name="name" rules={[{ required: true, message: '请输入孩子姓名' }]}>
+                <Input placeholder="孩子姓名" style={{ width: 160 }} />
+              </Form.Item>
+              <Form.Item name="gradeLevel">
+                <Select
+                  placeholder="年级阶段"
+                  style={{ width: 160 }}
+                  getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                  options={[
+                    { label: '学前', value: 'pre_k' },
+                    { label: '幼儿园', value: 'kindergarten' },
+                    { label: '幼升小', value: 'primary_prep' },
                   ]}
+                />
+              </Form.Item>
+              <Form.Item>
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  loading={childSubmitting}
+                  disabled={childSubmitting}
                 >
-                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  {children.length === 0 ? '保存' : '添加'}
+                </Button>
+                {children.length > 0 && (
+                  <Button style={{ marginLeft: 8 }} onClick={() => setShowChildForm(false)}>取消</Button>
+                )}
+              </Form.Item>
+            </Form>
+          ) : null}
+
+          {children.length > 0 && (
+            <Space wrap size={10}>
+              {children.map((item) => (
+                <Card
+                  key={item.id}
+                  size="small"
+                  className="list-item-soft"
+                  style={{ minWidth: 240 }}
+                  bodyStyle={{ padding: 12 }}
+                >
+                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
                     <Space wrap>
-                      <Typography.Text strong>{item.title}</Typography.Text>
-                      <Tag color="blue">{item.category}</Tag>
-                      <Tag>{getDifficultyLabel(item.difficulty)}</Tag>
-                      <Tag color={statusMeta.color}>{statusMeta.label}</Tag>
-                      {item.child?.name ? <Tag color="green">{item.child.name}</Tag> : <Tag>全家可见</Tag>}
-                      {item.dueDate && <Tag color="orange">截止 {dayjs(item.dueDate).format('MM-DD')}</Tag>}
+                      <Typography.Text strong style={{ fontSize: 16 }}>👶 {item.name}</Typography.Text>
+                      {item.gradeLevel && <Tag className="grade-tag">{getGradeLevelLabel(item.gradeLevel)}</Tag>}
+                    </Space>
+                    <Space size={8} wrap>
+                      <Tag color={((item.todayTaskCount ?? 0) > 0 ? 'orange' : 'default')}>今日 {(item.todayTaskCount ?? 0)} 条</Tag>
+                      <Tag color={((item.weeklyDoneCount ?? 0) > 0 ? 'green' : 'default')}>本周完成 {(item.weeklyDoneCount ?? 0)}</Tag>
+                    </Space>
+                    <Space size={4} wrap>
+                      <Link to={`/child/${item.id}/today`}>今日</Link>
+                      <Typography.Text type="secondary">·</Typography.Text>
+                      <Link to={`/reports/${item.id}`}>报告</Link>
+                      <Typography.Text type="secondary">·</Typography.Text>
+                      <Popconfirm
+                        title="删除该孩子？"
+                        description="对应的任务与进度也会一并删除"
+                        okText="删除"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                        overlayClassName="danger-popconfirm"
+                        onConfirm={() => onDeleteChild(item.id)}
+                      >
+                        <Button
+                          danger
+                          type="link"
+                          size="small"
+                          style={{ padding: 0 }}
+                          loading={deletingChildId === item.id}
+                        >
+                          删除
+                        </Button>
+                      </Popconfirm>
                     </Space>
                   </Space>
-                </List.Item>
-              );
-            }}
-          />
+                </Card>
+              ))}
+              {!showChildForm && children.length < 5 && (
+                <Button type="dashed" onClick={() => { childForm.resetFields(); setShowChildForm(true); }}>+ 再加一位</Button>
+              )}
+            </Space>
+          )}
         </Space>
       </Card>
+
+      {/* —— 本周学习计划（日历看板）—— */}
+      {(() => {
+        const weekStart = dayjs(boardWeekStart);
+        const days = Array.from({ length: 7 }, (_, i) => weekStart.add(i, 'day'));
+        const isThisWeek = boardWeekStart === computeWeekStart(dayjs());
+        const childOptions = [{ label: '全部孩子', value: '' }, ...children.map((c) => ({ label: c.name, value: c.id }))];
+
+        const filteredMaterials = materials.filter((m) => {
+          if (boardChildFilter && m.childId !== boardChildFilter) return false;
+          return true;
+        });
+
+        const materialsByDay = new Map<string, MaterialItem[]>();
+        const unscheduled: MaterialItem[] = [];
+        for (const m of filteredMaterials) {
+          const parsed = parseMaterialContent(m.content);
+          const d = parsed.scheduledDate;
+          if (!d) {
+            unscheduled.push(m);
+            continue;
+          }
+          if (!materialsByDay.has(d)) materialsByDay.set(d, []);
+          materialsByDay.get(d)!.push(m);
+        }
+
+        const weeklyDoneCount = days.reduce((sum, day) => {
+          const list = materialsByDay.get(day.format('YYYY-MM-DD')) || [];
+          return sum + list.filter((m) => !!parseMaterialContent(m.content).completedAt).length;
+        }, 0);
+        const weeklyTotalCount = days.reduce((sum, day) => sum + (materialsByDay.get(day.format('YYYY-MM-DD'))?.length || 0), 0);
+
+        return (
+          <Card
+            title={(
+              <Space>
+                <span>📅 本周学习计划</span>
+                <Tag color="blue">已完成 {weeklyDoneCount} / {weeklyTotalCount}</Tag>
+              </Space>
+            )}
+            className="app-section-card section-tasks"
+            extra={(
+              <Space wrap>
+                <Select
+                  size="small"
+                  value={boardChildFilter || ''}
+                  onChange={(v) => setBoardChildFilter(v || undefined)}
+                  options={childOptions}
+                  style={{ width: 140 }}
+                  getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                />
+                <Button size="small" onClick={() => setBoardWeekStart(dayjs(boardWeekStart).subtract(7, 'day').format('YYYY-MM-DD'))}>← 上周</Button>
+                <Button size="small" type={isThisWeek ? 'primary' : 'default'} onClick={() => setBoardWeekStart(computeWeekStart(dayjs()))}>本周</Button>
+                <Button size="small" onClick={() => setBoardWeekStart(dayjs(boardWeekStart).add(7, 'day').format('YYYY-MM-DD'))}>下周 →</Button>
+              </Space>
+            )}
+          >
+            <div className="calendar-board">
+              {days.map((day) => {
+                const key = day.format('YYYY-MM-DD');
+                const list = materialsByDay.get(key) || [];
+                const isToday = key === todayStr;
+                const weekdayLabel = ['一', '二', '三', '四', '五', '六', '日'][day.day() === 0 ? 6 : day.day() - 1];
+                return (
+                  <div key={key} className={`calendar-cell${isToday ? ' is-today' : ''}`}>
+                    <div className="calendar-cell-head">
+                      <span className="calendar-cell-weekday">周{weekdayLabel}</span>
+                      <span className="calendar-cell-date">{day.format('MM-DD')}</span>
+                      {isToday && <Tag color="processing" style={{ marginLeft: 4 }}>今日</Tag>}
+                    </div>
+                    <div className="calendar-cell-body">
+                      {list.length === 0 ? (
+                        <div className="calendar-cell-empty">—</div>
+                      ) : (
+                        list.map((m) => {
+                          const parsed = parseMaterialContent(m.content);
+                          const done = !!parsed.completedAt;
+                          const childName = children.find((c) => c.id === m.childId)?.name || '';
+                          const kindIcon = parsed.audioUrl ? '🎧' : parsed.videoUrl ? '🎬' : parsed.sourceType === 'image' ? '🖼️' : parsed.sourceType === 'audio' ? '🎵' : parsed.sourceType === 'video' ? '📹' : '📄';
+                          return (
+                            <div key={m.id} className={`calendar-item${done ? ' is-done' : ''}`}>
+                              <Checkbox
+                                checked={done}
+                                disabled={completeBusyId === m.id}
+                                onChange={(e) => onUpdateMaterial(m.id, { completed: e.target.checked }, 'complete')}
+                              />
+                              <span className="calendar-item-icon">{kindIcon}</span>
+                              <span className="calendar-item-title" title={parsed.fileName}>{parsed.fileName}</span>
+                              {childName && <Tag color="green" style={{ marginLeft: 2 }}>{childName}</Tag>}
+                              <Button
+                                type="text"
+                                size="small"
+                                style={{ marginLeft: 'auto', padding: '0 4px' }}
+                                onClick={() => onUpdateMaterial(m.id, { scheduledDate: null })}
+                                loading={scheduleBusyId === m.id}
+                                title="移出日历"
+                              >✕</Button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {unscheduled.length > 0 && (
+              <div className="unscheduled-bar">
+                <Typography.Text type="secondary" style={{ marginRight: 8 }}>📦 未安排日期（{unscheduled.length}）：</Typography.Text>
+                <Space wrap size={6}>
+                  {unscheduled.slice(0, 8).map((m) => {
+                    const parsed = parseMaterialContent(m.content);
+                    return (
+                      <Tag
+                        key={m.id}
+                        color="orange"
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => onUpdateMaterial(m.id, { scheduledDate: todayStr })}
+                        title="点击：安排到今天"
+                      >
+                        {parsed.fileName} → 安排到今天
+                      </Tag>
+                    );
+                  })}
+                  {unscheduled.length > 8 && <Typography.Text type="secondary">…+{unscheduled.length - 8}</Typography.Text>}
+                </Space>
+              </div>
+            )}
+          </Card>
+        );
+      })()}
 
       <Card
         title={
@@ -1800,6 +1989,13 @@ export default function AppLearning() {
                         onChange={(v) => setUploadChildId(v)}
                         options={children.map((c) => ({ label: c.name, value: c.id }))}
                       />
+                      <Input
+                        type="date"
+                        value={uploadScheduledDate}
+                        onChange={(e) => setUploadScheduledDate(e.target.value)}
+                        style={{ width: 160 }}
+                        prefix={<span>📅</span>}
+                      />
                       <Button onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading || !uploadFile}>仅上传</Button>
                       <Button type="primary" size="large" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
                         ✨ 一键生成音视频
@@ -1836,6 +2032,13 @@ export default function AppLearning() {
                         value={uploadChildId}
                         onChange={(v) => setUploadChildId(v)}
                         options={children.map((c) => ({ label: c.name, value: c.id }))}
+                      />
+                      <Input
+                        type="date"
+                        value={uploadScheduledDate}
+                        onChange={(e) => setUploadScheduledDate(e.target.value)}
+                        style={{ width: 160 }}
+                        prefix={<span>📅</span>}
                       />
                       <Button
                         type="primary"
@@ -1942,6 +2145,8 @@ export default function AppLearning() {
                           return aiMeta ? <Tag color={aiMeta.color}>{aiMeta.label}</Tag> : null;
                         })()}
                         {item.childId ? <Tag color="blue">已绑定孩子</Tag> : null}
+                        {parsed.scheduledDate && <Tag color="geekblue">📅 {dayjs(parsed.scheduledDate).format('MM-DD')}</Tag>}
+                        {parsed.completedAt && <Tag color="success">✅ 已完成</Tag>}
                         {isRecognitionLikelyTruncated(parsed.recognitionText) && <Tag color="gold">识别内容已截断</Tag>}
                       </Space>
                       <Popconfirm
@@ -1967,6 +2172,38 @@ export default function AppLearning() {
                     <div className="material-meta-row">
                       <Typography.Text type="secondary">⏱️ {dayjs(item.createdAt).format('YYYY-MM-DD HH:mm')}</Typography.Text>
                     </div>
+
+                    <Space wrap size={8} className="material-org-row">
+                      <span style={{ fontSize: 12, color: '#8c8c8c' }}>📅 安排到</span>
+                      <Input
+                        type="date"
+                        size="small"
+                        style={{ width: 150 }}
+                        value={parsed.scheduledDate || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          void onUpdateMaterial(item.id, { scheduledDate: v || null });
+                        }}
+                      />
+                      <span style={{ fontSize: 12, color: '#8c8c8c', marginLeft: 4 }}>👶 孩子</span>
+                      <Select
+                        size="small"
+                        allowClear
+                        placeholder="未绑定"
+                        style={{ width: 140 }}
+                        getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                        value={item.childId || undefined}
+                        onChange={(v) => onUpdateMaterial(item.id, { childId: v || null })}
+                        options={children.map((c) => ({ label: c.name, value: c.id }))}
+                      />
+                      <Checkbox
+                        checked={!!parsed.completedAt}
+                        disabled={completeBusyId === item.id}
+                        onChange={(e) => onUpdateMaterial(item.id, { completed: e.target.checked }, 'complete')}
+                      >
+                        已完成
+                      </Checkbox>
+                    </Space>
 
                     {!!parsed.fallbackReason && (
                       <Typography.Text type="warning">回退说明：{getFallbackReasonText(parsed.fallbackReason)}</Typography.Text>

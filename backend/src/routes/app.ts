@@ -776,7 +776,7 @@ function detectTextFromMaterialContent(content: Record<string, unknown>) {
   try {
     const raw = fs.readFileSync(resolveUploadFilePath(fileUrl), 'utf-8');
     const normalized = raw.replace(/\s+/g, ' ').trim();
-    if (normalized) return normalized.slice(0, 1200);
+    if (normalized) return normalized.slice(0, 6000);
   } catch {
     // ignore fallback
   }
@@ -845,6 +845,7 @@ interface GenerateMaterialTaskParams {
   category?: string;
   difficulty?: number;
   mediaKind?: MediaKind;
+  dueDate?: string | null;
 }
 
 async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams) {
@@ -879,6 +880,13 @@ async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams)
       mediaKind: params.mediaKind || 'both',
     });
 
+    const parsedDueDate = params.dueDate
+      ? (() => {
+          const d = new Date(params.dueDate as string);
+          return Number.isNaN(d.getTime()) ? null : d;
+        })()
+      : null;
+
     const task = await prisma.learningTask.create({
       data: {
         parentId: params.parentId,
@@ -888,6 +896,7 @@ async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams)
         category: safeCategory,
         difficulty: safeDifficulty,
         source: 'library-generated',
+        dueDate: parsedDueDate,
       },
       include: { child: { select: { id: true, name: true } } },
     });
@@ -993,6 +1002,9 @@ router.post('/library/materials', requireAppParent, writeLimiter, (req, res, nex
       }
     }
 
+    const rawScheduled = (req.body?.scheduledDate as string | undefined)?.trim() || '';
+    const scheduledDate = /^\d{4}-\d{2}-\d{2}$/.test(rawScheduled) ? rawScheduled : null;
+
     const sourceType = inferSourceType(file.mimetype || '', file.originalname || file.filename);
     const fileUrl = `/uploads/app-library/${file.filename}`;
 
@@ -1007,6 +1019,7 @@ router.post('/library/materials', requireAppParent, writeLimiter, (req, res, nex
           mimeType: file.mimetype || null,
           fileSize: file.size,
           fileUrl,
+          scheduledDate,
           status: 'uploaded',
           recognitionResult: null,
         },
@@ -1076,12 +1089,13 @@ router.post('/library/materials/:id/generate-task', requireAppParent, writeLimit
       return;
     }
 
-    const { childId, title, category, difficulty, mediaKind } = req.body as {
+    const { childId, title, category, difficulty, mediaKind, dueDate } = req.body as {
       childId?: string;
       title?: string;
       category?: string;
       difficulty?: number;
       mediaKind?: MediaKind;
+      dueDate?: string;
     };
 
     let nextChildId: string | null = material.childId || null;
@@ -1137,6 +1151,7 @@ router.post('/library/materials/:id/generate-task', requireAppParent, writeLimit
       category,
       difficulty,
       mediaKind: normalizedMediaKind,
+      dueDate: dueDate?.trim() || null,
     });
 
     res.json(updated);
@@ -1204,6 +1219,84 @@ router.delete('/library/materials/:id', requireAppParent, writeLimiter, async (r
       return;
     }
     res.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+router.patch('/library/materials/:id', requireAppParent, writeLimiter, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const material = await prisma.appArtifact.findFirst({ where: { id: req.params.id, parentId: payload.sub } });
+    if (!material) {
+      res.status(404).json({ error: '未找到学习资料' });
+      return;
+    }
+
+    const body = (req.body || {}) as Record<string, unknown>;
+
+    // childId: 传 null 解绑；传 string 校验后绑定；未传保持
+    let nextChildId: string | null | undefined = undefined;
+    if ('childId' in body) {
+      const raw = body.childId;
+      if (raw === null || raw === '' || raw === undefined) {
+        nextChildId = null;
+      } else if (typeof raw === 'string' && raw.trim()) {
+        const child = await ensureOwnedChild(payload.sub, raw.trim());
+        if (!child) {
+          res.status(403).json({ error: '无权限访问该孩子档案' });
+          return;
+        }
+        nextChildId = child.id;
+      }
+    }
+
+    const content = (material.content || {}) as Record<string, unknown>;
+    const nextContent: Record<string, unknown> = { ...content };
+    let contentChanged = false;
+
+    if ('scheduledDate' in body) {
+      const raw = body.scheduledDate;
+      if (raw === null || raw === '' || raw === undefined) {
+        nextContent.scheduledDate = null;
+        contentChanged = true;
+      } else if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) {
+        nextContent.scheduledDate = raw.trim();
+        contentChanged = true;
+      }
+    }
+
+    if ('completed' in body) {
+      const flag = body.completed === true || body.completed === 'true';
+      if (flag) {
+        nextContent.completedAt = new Date().toISOString();
+      } else {
+        nextContent.completedAt = null;
+      }
+      contentChanged = true;
+    }
+
+    const updateData: Record<string, unknown> = {};
+    if (nextChildId !== undefined) updateData.childId = nextChildId;
+    if (contentChanged) updateData.content = nextContent as unknown as Prisma.InputJsonValue;
+
+    if (!Object.keys(updateData).length) {
+      res.json(material);
+      return;
+    }
+
+    const updated = await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: updateData,
+    });
+
+    res.json(updated);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
