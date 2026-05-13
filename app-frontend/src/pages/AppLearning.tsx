@@ -21,17 +21,6 @@ interface Child {
   latestLearningAt?: string | null;
 }
 
-interface TaskItem {
-  id: string;
-  title: string;
-  category: string;
-  difficulty: number;
-  status: 'draft' | 'active' | 'archived';
-  dueDate?: string | null;
-  childId?: string | null;
-  child?: { id: string; name: string } | null;
-}
-
 interface MaterialItem {
   id: string;
   childId?: string | null;
@@ -242,7 +231,6 @@ export default function AppLearning() {
   const [token, setToken] = useState<string | null>(() => getAppToken());
   const [me, setMe] = useState<ParentUser | null>(null);
   const [children, setChildren] = useState<Child[]>([]);
-  const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [authMode, setAuthMode] = useState<'register' | 'login'>('login');
@@ -293,14 +281,43 @@ export default function AppLearning() {
   const registerPassword = Form.useWatch('password', registerForm) || '';
   const resetPassword = Form.useWatch('password', resetForm) || '';
 
-  const totalTodayTaskCount = useMemo(
-    () => children.reduce((sum, child) => sum + (child.todayTaskCount ?? 0), 0),
-    [children]
-  );
-  const totalWeeklyDoneCount = useMemo(
-    () => children.reduce((sum, child) => sum + (child.weeklyDoneCount ?? 0), 0),
-    [children]
-  );
+  // —— 基于 materials.scheduledDate/completedAt 重新计算统计（取代已废弃的 LearningTask 统计）——
+  const materialStats = useMemo(() => {
+    const today = dayjs().format('YYYY-MM-DD');
+    const day0 = dayjs();
+    const day = day0.day();
+    const weekStart = day0.subtract(day === 0 ? 6 : day - 1, 'day').format('YYYY-MM-DD');
+    const weekEnd = dayjs(weekStart).add(6, 'day').format('YYYY-MM-DD');
+
+    let totalScheduled = 0;
+    let totalCompleted = 0;
+    let todayCount = 0;
+    let weekDone = 0;
+    const perChildToday = new Map<string, number>();
+    const perChildWeekDone = new Map<string, number>();
+
+    for (const m of materials) {
+      const parsed = parseMaterialContent(m.content);
+      const sd = parsed.scheduledDate;
+      const cd = parsed.completedAt;
+      if (sd) {
+        totalScheduled += 1;
+        if (sd === today) {
+          todayCount += 1;
+          if (m.childId) perChildToday.set(m.childId, (perChildToday.get(m.childId) || 0) + 1);
+        }
+        if (sd >= weekStart && sd <= weekEnd) {
+          if (cd) {
+            weekDone += 1;
+            if (m.childId) perChildWeekDone.set(m.childId, (perChildWeekDone.get(m.childId) || 0) + 1);
+          }
+        }
+      }
+      if (cd) totalCompleted += 1;
+    }
+
+    return { totalScheduled, totalCompleted, todayCount, weekDone, perChildToday, perChildWeekDone };
+  }, [materials]);
 
   const reloadAll = async () => {
     if (!token) return;
@@ -313,9 +330,8 @@ export default function AppLearning() {
       }
       setMe((meData && typeof meData === 'object' ? meData : null) as ParentUser | null);
 
-      const [childRes, taskRes, materialRes] = await Promise.all([
+      const [childRes, materialRes] = await Promise.all([
         appFetch(`${APP_API_BASE}/children`),
-        appFetch(`${APP_API_BASE}/tasks`),
         appFetch(`${APP_API_BASE}/library/materials`),
       ]);
 
@@ -330,17 +346,6 @@ export default function AppLearning() {
         }
       } catch {
         errors.push('孩子列表服务暂时不可用，请稍后重试');
-      }
-
-      try {
-        const taskData = await parseApiResponse(taskRes);
-        if (taskRes.ok) {
-          setTasks(Array.isArray(taskData) ? (taskData as TaskItem[]) : []);
-        } else {
-          errors.push(getApiErrorMessage(taskData, '任务列表加载失败', taskRes.status));
-        }
-      } catch {
-        errors.push('任务列表服务暂时不可用，请稍后重试');
       }
 
       try {
@@ -1650,20 +1655,16 @@ export default function AppLearning() {
               <Typography.Title level={4} style={{ margin: 0 }}>{children.length}</Typography.Title>
             </Card>
             <Card size="small" className="metric-card">
-              <Typography.Text type="secondary">任务总数</Typography.Text>
-              <Typography.Title level={4} style={{ margin: 0 }}>{tasks.length}</Typography.Title>
+              <Typography.Text type="secondary">资料总数</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>{materials.length}</Typography.Title>
             </Card>
             <Card size="small" className="metric-card">
-              <Typography.Text type="secondary">今日任务</Typography.Text>
-              <Typography.Title level={4} style={{ margin: 0 }}>{totalTodayTaskCount}</Typography.Title>
+              <Typography.Text type="secondary">今日待学</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>{materialStats.todayCount}</Typography.Title>
             </Card>
             <Card size="small" className="metric-card">
               <Typography.Text type="secondary">本周完成</Typography.Text>
-              <Typography.Title level={4} style={{ margin: 0 }}>{totalWeeklyDoneCount}</Typography.Title>
-            </Card>
-            <Card size="small" className="metric-card">
-              <Typography.Text type="secondary">资料总数</Typography.Text>
-              <Typography.Title level={4} style={{ margin: 0 }}>{materials.length}</Typography.Title>
+              <Typography.Title level={4} style={{ margin: 0 }}>{materialStats.weekDone}</Typography.Title>
             </Card>
           </div>
           {children.length === 0 && materials.length === 0 ? (
@@ -1736,8 +1737,16 @@ export default function AppLearning() {
                       {item.gradeLevel && <Tag className="grade-tag">{getGradeLevelLabel(item.gradeLevel)}</Tag>}
                     </Space>
                     <Space size={8} wrap>
-                      <Tag color={((item.todayTaskCount ?? 0) > 0 ? 'orange' : 'default')}>今日 {(item.todayTaskCount ?? 0)} 条</Tag>
-                      <Tag color={((item.weeklyDoneCount ?? 0) > 0 ? 'green' : 'default')}>本周完成 {(item.weeklyDoneCount ?? 0)}</Tag>
+                      {(() => {
+                        const t = materialStats.perChildToday.get(item.id) || 0;
+                        const w = materialStats.perChildWeekDone.get(item.id) || 0;
+                        return (
+                          <>
+                            <Tag color={t > 0 ? 'orange' : 'default'}>今日 {t} 条</Tag>
+                            <Tag color={w > 0 ? 'green' : 'default'}>本周完成 {w}</Tag>
+                          </>
+                        );
+                      })()}
                     </Space>
                     <Space size={4} wrap>
                       <Link to={`/child/${item.id}/today`}>今日</Link>
