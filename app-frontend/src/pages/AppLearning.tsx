@@ -4,6 +4,7 @@ import { Alert, Button, Card, Checkbox, Form, Input, List, Progress, Select, Spa
 import type { FormInstance } from 'antd';
 import dayjs from 'dayjs';
 import { APP_API_BASE, appFetch, appUpload, clearAppToken, getAppToken, setAppToken } from '../api.app';
+import { recognizeImageText, isLikelyImage } from '../lib/ocr';
 
 interface ParentUser {
   id: string;
@@ -258,6 +259,9 @@ export default function AppLearning() {
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
   const [createMode, setCreateMode] = useState<'upload' | 'paste'>('upload');
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrStage, setOcrStage] = useState<string>('');
+  const [ocrPercent, setOcrPercent] = useState(0);
 
   // —— 日历看板 & 安排日期相关 ——
   const todayStr = dayjs().format('YYYY-MM-DD');
@@ -700,8 +704,7 @@ export default function AppLearning() {
 
       setUploadFile(null);
       setUploadChildId(undefined);
-      const fileInput = document.querySelector<HTMLInputElement>('input[type="file"][data-role="material-upload"]');
-      if (fileInput) fileInput.value = '';
+      document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
       await reloadAll();
     } catch (e) {
       message.error(e instanceof Error ? e.message : '上传失败，请稍后重试');
@@ -711,6 +714,42 @@ export default function AppLearning() {
       window.setTimeout(() => {
         setUploadPercent(0);
         setUploadStage('');
+      }, 1500);
+    }
+  };
+
+  // 拍照/相册选完图片后：客户端 OCR → 自动切到"粘贴文本" tab + 预填识别文字
+  const onPickImageForOcr = async (file: File) => {
+    setUploadFile(file); // 保留原图作为可上传的兜底
+    if (!isLikelyImage(file)) return; // 非图片不走 OCR
+    setOcrBusy(true);
+    setOcrPercent(2);
+    setOcrStage('📦 正在准备识别模型…');
+    try {
+      const text = await recognizeImageText(file, (p) => {
+        setOcrPercent(p.percent);
+        if (p.stage === 'loading_model') setOcrStage('📦 正在加载识别模型（首次较慢）…');
+        else if (p.stage === 'recognizing') setOcrStage('🔍 AI 正在识别图片文字…');
+        else setOcrStage('✅ 识别完成');
+      });
+      const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+      if (!cleaned) {
+        message.warning('没有识别到可朗读的文字。你可以切到「📝 粘贴文本」自己输入');
+        return;
+      }
+      // 取文件名作为默认标题
+      const baseTitle = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || '拍照学习';
+      setDirectMediaTitle(baseTitle);
+      setDirectMediaText(text);
+      setCreateMode('paste');
+      message.success(`✅ 已识别 ${cleaned.length} 个字，可在「粘贴文本」中编辑后一键生成`);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '识别失败，请稍后重试或手动输入');
+    } finally {
+      setOcrBusy(false);
+      window.setTimeout(() => {
+        setOcrPercent(0);
+        setOcrStage('');
       }, 1500);
     }
   };
@@ -1971,22 +2010,64 @@ export default function AppLearning() {
                 label: '📤 上传文件',
                 children: (
                   <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                    <Space wrap align="center" size={10} className="upload-row">
-                      <label className="file-pick-btn">
-                        <span>📎 选择文件</span>
+                    <div className="upload-pick-grid">
+                      <label className="file-pick-btn camera">
+                        <span className="file-pick-emoji">📷</span>
+                        <span className="file-pick-label">拍照</span>
+                        <span className="file-pick-sub">拍课本/绘本</span>
                         <input
                           type="file"
                           data-role="material-upload"
-                          onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-                          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.markdown,.csv"
+                          accept="image/*"
+                          capture="environment"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) void onPickImageForOcr(f);
+                          }}
                         />
                       </label>
+                      <label className="file-pick-btn album">
+                        <span className="file-pick-emoji">🖼️</span>
+                        <span className="file-pick-label">相册</span>
+                        <span className="file-pick-sub">从手机相册</span>
+                        <input
+                          type="file"
+                          data-role="material-upload"
+                          accept="image/*"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) void onPickImageForOcr(f);
+                          }}
+                        />
+                      </label>
+                      <label className="file-pick-btn other">
+                        <span className="file-pick-emoji">📄</span>
+                        <span className="file-pick-label">其他</span>
+                        <span className="file-pick-sub">PDF/音视频/文档</span>
+                        <input
+                          type="file"
+                          data-role="material-upload"
+                          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.markdown,.csv"
+                          onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                        />
+                      </label>
+                    </div>
+                    {(ocrBusy || ocrStage) && (
+                      <div className="upload-progress-box">
+                        <Progress
+                          percent={ocrPercent}
+                          status={ocrPercent >= 100 ? 'success' : 'active'}
+                          strokeColor={{ from: '#fa8c16', to: '#722ed1' }}
+                        />
+                        <div className="upload-stage-text">{ocrStage || '正在识别…'}</div>
+                      </div>
+                    )}
+                    <Space wrap align="center" size={10} className="upload-row">
                       {uploadFile && (
                         <Tag color="blue" closable onClose={(e) => {
                           e.preventDefault();
                           setUploadFile(null);
-                          const fi = document.querySelector<HTMLInputElement>('input[type="file"][data-role="material-upload"]');
-                          if (fi) fi.value = '';
+                          document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
                         }}>
                           {uploadFile.name}
                         </Tag>

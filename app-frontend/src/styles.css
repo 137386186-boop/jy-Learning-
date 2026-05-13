@@ -240,27 +240,94 @@ body {
   padding: 6px 0 2px;
 }
 
+.upload-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
 .file-pick-btn {
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: 22px;
+  justify-content: center;
+  gap: 2px;
+  padding: 14px 8px;
+  border-radius: 14px;
   background: linear-gradient(135deg, #f0f5ff 0%, #fff 100%);
-  border: 1px dashed #91caff;
+  border: 1.5px dashed #91caff;
   color: #1d39c4;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
+  text-align: center;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.file-pick-btn:hover {
+.file-pick-btn:hover,
+.file-pick-btn:active {
   background: linear-gradient(135deg, #e6f4ff 0%, #f9fbff 100%);
   border-color: #4096ff;
+  transform: translateY(-1px);
+}
+
+.file-pick-btn.camera {
+  background: linear-gradient(135deg, #fff7e6 0%, #ffffff 100%);
+  border-color: #ffd591;
+  color: #d46b08;
+}
+.file-pick-btn.camera:hover,
+.file-pick-btn.camera:active {
+  background: linear-gradient(135deg, #ffe7ba 0%, #fff9f0 100%);
+  border-color: #fa8c16;
+}
+
+.file-pick-btn.album {
+  background: linear-gradient(135deg, #f6ffed 0%, #ffffff 100%);
+  border-color: #b7eb8f;
+  color: #389e0d;
+}
+.file-pick-btn.album:hover,
+.file-pick-btn.album:active {
+  background: linear-gradient(135deg, #d9f7be 0%, #f6ffed 100%);
+  border-color: #52c41a;
+}
+
+.file-pick-emoji {
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.file-pick-label {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.file-pick-sub {
+  font-size: 11px;
+  color: #8c8c8c;
+  font-weight: 400;
 }
 
 .file-pick-btn input[type="file"] {
   display: none;
+}
+
+@media (max-width: 480px) {
+  .file-pick-btn {
+    padding: 16px 6px;
+  }
+  .file-pick-emoji {
+    font-size: 32px;
+  }
+  .file-pick-label {
+    font-size: 16px;
+  }
+  .file-pick-sub {
+    font-size: 10px;
+  }
 }
 
 .hero-cta {
