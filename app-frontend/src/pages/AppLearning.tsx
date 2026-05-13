@@ -264,8 +264,6 @@ export default function AppLearning() {
   const [childSubmitting, setChildSubmitting] = useState(false);
   const [taskSubmitting, setTaskSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [speakingMaterialId, setSpeakingMaterialId] = useState<string | null>(null);
-  const [videoMaterialId, setVideoMaterialId] = useState<string | null>(null);
   const [deletingChildId, setDeletingChildId] = useState<string | null>(null);
   const [materialBusyId, setMaterialBusyId] = useState<string | null>(null);
   const [materialAction, setMaterialAction] = useState<'recognize' | 'generate' | 'audio' | 'video' | null>(null);
@@ -282,6 +280,8 @@ export default function AppLearning() {
   const [deletingMaterialId, setDeletingMaterialId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [createMode, setCreateMode] = useState<'upload' | 'paste'>('upload');
 
   const [loginForm] = Form.useForm();
   const [forgotForm] = Form.useForm();
@@ -589,6 +589,26 @@ export default function AppLearning() {
     }
   };
 
+  const onDeleteTask = async (taskId: string) => {
+    setDeletingTaskId(taskId);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/tasks/${taskId}`, {
+        method: 'DELETE',
+      });
+      const data = await parseApiResponse(res);
+      if (!res.ok) {
+        message.error(getApiErrorMessage(data, '删除任务失败', res.status));
+        return;
+      }
+      message.success('任务已删除');
+      await reloadAll();
+    } catch {
+      message.error('删除任务失败，请稍后重试');
+    } finally {
+      setDeletingTaskId(null);
+    }
+  };
+
   const onDeleteChild = async (childId: string) => {
     setDeletingChildId(childId);
     try {
@@ -655,8 +675,9 @@ export default function AppLearning() {
     window.setTimeout(() => setCelebrate(false), 2400);
   };
 
-  const onUploadMaterial = async (autoGenerateTask?: boolean) => {
-    if (!uploadFile) {
+  const onUploadMaterial = async (autoGenerateTask?: boolean, fileOverride?: File) => {
+    const fileToUpload = fileOverride || uploadFile;
+    if (!fileToUpload) {
       message.warning('请先选择要上传的文件');
       return;
     }
@@ -665,7 +686,7 @@ export default function AppLearning() {
     setUploadStage('📤 正在上传文件…');
     try {
       const formData = new FormData();
-      formData.append('file', uploadFile);
+      formData.append('file', fileToUpload);
       if (uploadChildId) formData.append('childId', uploadChildId);
 
       const uploadRes = await appUpload(
@@ -888,15 +909,12 @@ export default function AppLearning() {
     utterance.rate = 0.95;
     utterance.pitch = 1;
 
-    setSpeakingMaterialId(materialId);
     message.loading({ content: '正在生成并播放音频…', key: `speak-${materialId}` });
 
     utterance.onend = () => {
-      setSpeakingMaterialId(null);
       message.success({ content: '音频播放完成', key: `speak-${materialId}` });
     };
     utterance.onerror = () => {
-      setSpeakingMaterialId(null);
       message.error({ content: '音频生成失败，请重试', key: `speak-${materialId}` });
     };
 
@@ -930,26 +948,60 @@ export default function AppLearning() {
       return null;
     }
 
-    const maxCharsPerLine = isPortrait ? 14 : 22;
-    const lines = content
+    // ---- 分镜：按句拆分场景 ----
+    const rawScenes = content
       .replace(/\r/g, '')
-      .split(/\n+/)
-      .flatMap((line) => {
-        const value = line.trim();
-        if (!value) return [];
-        const parts: string[] = [];
-        for (let i = 0; i < value.length; i += maxCharsPerLine) {
-          parts.push(value.slice(i, i + maxCharsPerLine));
-        }
-        return parts;
-      })
-      .slice(0, 36);
+      .split(/[\n。！？!?；;]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .slice(0, 14);
+    const scenes = rawScenes.length > 0 ? rawScenes : [content.slice(0, 80)];
+    const rawDurations = scenes.map((s) => Math.max(2400, Math.min(6800, s.length * 220)));
+    const rawTotal = rawDurations.reduce((a, b) => a + b, 0);
+    const targetTotal = Math.min(58000, Math.max(9000, rawTotal));
+    const durScale = targetTotal / rawTotal;
+    const sceneDurations = rawDurations.map((d) => Math.round(d * durScale));
+    const sceneStarts: number[] = [];
+    {
+      let acc = 0;
+      for (const d of sceneDurations) {
+        sceneStarts.push(acc);
+        acc += d;
+      }
+    }
+    const durationMs = sceneStarts[sceneStarts.length - 1] + sceneDurations[sceneDurations.length - 1];
+
+    // ---- 视觉资产 ----
+    const characters = ['👩‍🏫', '🧑‍🎨', '🦊', '🐱', '🐻', '🐯', '🐼', '🦁', '🐧', '🐰', '🦝', '🐨'];
+    const character = characters[Math.floor(Math.random() * characters.length)];
+    const decoEmojis = ['⭐', '✨', '💫', '❤️', '🎈', '🌟', '🌈', '🍀', '🌸', '🌼', '📚', '💡', '🎵', '🎨'];
+    const themes = [
+      { bg1: '#fff0f6', bg2: '#ffe7ba', accent: '#eb2f96', soft: 'rgba(255,133,162,0.18)' },
+      { bg1: '#e6f4ff', bg2: '#f6ffed', accent: '#1677ff', soft: 'rgba(22,119,255,0.16)' },
+      { bg1: '#f9f0ff', bg2: '#fff7e6', accent: '#722ed1', soft: 'rgba(114,46,209,0.18)' },
+      { bg1: '#e6fffb', bg2: '#fff0f6', accent: '#13c2c2', soft: 'rgba(19,194,194,0.18)' },
+      { bg1: '#fff7e6', bg2: '#fff0f6', accent: '#fa8c16', soft: 'rgba(250,140,22,0.18)' },
+      { bg1: '#f6ffed', bg2: '#e6f4ff', accent: '#52c41a', soft: 'rgba(82,196,26,0.18)' },
+    ];
+
+    const roundRect = (cx: number, cy: number, w: number, h: number, r: number) => {
+      ctx.beginPath();
+      ctx.moveTo(cx + r, cy);
+      ctx.lineTo(cx + w - r, cy);
+      ctx.quadraticCurveTo(cx + w, cy, cx + w, cy + r);
+      ctx.lineTo(cx + w, cy + h - r);
+      ctx.quadraticCurveTo(cx + w, cy + h, cx + w - r, cy + h);
+      ctx.lineTo(cx + r, cy + h);
+      ctx.quadraticCurveTo(cx, cy + h, cx, cy + h - r);
+      ctx.lineTo(cx, cy + r);
+      ctx.quadraticCurveTo(cx, cy, cx + r, cy);
+      ctx.closePath();
+    };
 
     const preferredTypes = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
     const mimeType = preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) || '';
 
-    setVideoMaterialId(videoKey);
-    message.loading({ content: `正在生成${isPortrait ? '竖屏' : '横屏'}视频，请稍候…`, key: `video-${videoKey}` });
+    message.loading({ content: `🎬 正在演绎成${isPortrait ? '竖屏' : '横屏'}视频…`, key: `video-${videoKey}` });
 
     let audioContext: AudioContext | null = null;
     try {
@@ -957,28 +1009,44 @@ export default function AppLearning() {
       audioContext = new AudioContext();
       const destination = audioContext.createMediaStreamDestination();
       const masterGain = audioContext.createGain();
-      masterGain.gain.value = 0.03;
+      masterGain.gain.value = 0.045;
       masterGain.connect(destination);
 
-      const durationMs = Math.min(28000, Math.max(10000, lines.length * 850));
-      const beatMs = 600;
-      const notePattern = [392, 523.25, 659.25, 523.25];
-      for (let i = 0; i * beatMs < durationMs + 1200; i += 1) {
-        const oscillator = audioContext.createOscillator();
-        const gainNode = audioContext.createGain();
-        oscillator.type = i % 8 < 4 ? 'sine' : 'triangle';
-        oscillator.frequency.value = notePattern[i % notePattern.length];
-        gainNode.gain.value = 0;
-        oscillator.connect(gainNode);
-        gainNode.connect(masterGain);
-
+      // 轻柔背景旋律（更缓慢，营造氛围感）
+      const beatMs = 720;
+      const melody = [523.25, 659.25, 784.0, 659.25, 587.33, 523.25, 440.0, 523.25];
+      for (let i = 0; i * beatMs < durationMs + 1500; i += 1) {
+        const osc = audioContext.createOscillator();
+        const g = audioContext.createGain();
+        osc.type = i % 4 < 2 ? 'sine' : 'triangle';
+        osc.frequency.value = melody[i % melody.length];
+        g.gain.value = 0;
+        osc.connect(g);
+        g.connect(masterGain);
         const startTime = audioContext.currentTime + (i * beatMs) / 1000;
-        const endTime = startTime + 0.46;
-        gainNode.gain.setValueAtTime(0, startTime);
-        gainNode.gain.linearRampToValueAtTime(1, startTime + 0.08);
-        gainNode.gain.linearRampToValueAtTime(0.01, endTime);
-        oscillator.start(startTime);
-        oscillator.stop(endTime + 0.02);
+        const endTime = startTime + 0.55;
+        g.gain.setValueAtTime(0, startTime);
+        g.gain.linearRampToValueAtTime(0.9, startTime + 0.1);
+        g.gain.linearRampToValueAtTime(0.01, endTime);
+        osc.start(startTime);
+        osc.stop(endTime + 0.05);
+      }
+      // 场景切换"叮"音
+      for (let s = 0; s < sceneStarts.length; s += 1) {
+        const osc = audioContext.createOscillator();
+        const g = audioContext.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = 1318.5;
+        g.gain.value = 0;
+        osc.connect(g);
+        g.connect(masterGain);
+        const startTime = audioContext.currentTime + sceneStarts[s] / 1000;
+        const endTime = startTime + 0.35;
+        g.gain.setValueAtTime(0, startTime);
+        g.gain.linearRampToValueAtTime(1.6, startTime + 0.04);
+        g.gain.linearRampToValueAtTime(0.01, endTime);
+        osc.start(startTime);
+        osc.stop(endTime + 0.02);
       }
 
       const mixedStream = new MediaStream([
@@ -993,71 +1061,167 @@ export default function AppLearning() {
       };
 
       const startedAt = Date.now();
-      const totalChars = Math.max(1, lines.join('').length);
       let raf = 0;
 
       const draw = () => {
         const elapsed = Date.now() - startedAt;
-        const progress = Math.min(1, elapsed / durationMs);
-        const activeChar = Math.floor(progress * totalChars);
 
-        const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-        gradient.addColorStop(0, '#e6f4ff');
-        gradient.addColorStop(0.5, '#fff7e6');
-        gradient.addColorStop(1, '#f6ffed');
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        ctx.fillStyle = '#1d39c4';
-        ctx.font = `bold ${isPortrait ? 40 : 58}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-        ctx.fillText('幼升小启蒙课堂', isPortrait ? 50 : 90, isPortrait ? 90 : 120);
-
-        ctx.fillStyle = '#262626';
-        ctx.font = `${isPortrait ? 30 : 42}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-        ctx.fillText(title || '学习资料', isPortrait ? 50 : 90, isPortrait ? 145 : 190);
-
-        let consumed = 0;
-        let currentLineIndex = 0;
-        for (let i = 0; i < lines.length; i += 1) {
-          const next = consumed + lines[i].length;
-          if (activeChar <= next) {
-            currentLineIndex = i;
+        // 当前场景
+        let sceneIdx = scenes.length - 1;
+        for (let i = 0; i < scenes.length; i += 1) {
+          if (elapsed < sceneStarts[i] + sceneDurations[i]) {
+            sceneIdx = i;
             break;
           }
-          consumed = next;
+        }
+        const sceneElapsed = elapsed - sceneStarts[sceneIdx];
+        const sceneDur = sceneDurations[sceneIdx];
+        const sceneProgress = Math.max(0, Math.min(1, sceneElapsed / sceneDur));
+        const theme = themes[sceneIdx % themes.length];
+        const t = elapsed / 1000;
+
+        // 1. 背景径向渐变
+        const grad = ctx.createRadialGradient(
+          canvas.width / 2,
+          canvas.height / 2,
+          80,
+          canvas.width / 2,
+          canvas.height / 2,
+          Math.max(canvas.width, canvas.height) * 0.75
+        );
+        grad.addColorStop(0, theme.bg1);
+        grad.addColorStop(1, theme.bg2);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // 2. 漂浮装饰 emoji
+        ctx.font = `${isPortrait ? 30 : 36}px sans-serif`;
+        ctx.globalAlpha = 0.6;
+        for (let i = 0; i < 14; i += 1) {
+          const e = decoEmojis[(i + sceneIdx) % decoEmojis.length];
+          const baseX = ((i * 137) % (canvas.width - 80)) + 40;
+          const baseY = ((i * 211) % (canvas.height - 260)) + 110;
+          const px = baseX + Math.sin(t * 0.7 + i * 0.9) * 20;
+          const py = baseY + Math.cos(t * 0.6 + i * 0.7) * 16;
+          ctx.fillText(e, px, py);
+        }
+        ctx.globalAlpha = 1;
+
+        // 3. 顶部标题
+        ctx.fillStyle = theme.accent;
+        ctx.font = `bold ${isPortrait ? 30 : 38}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+        const titleY = isPortrait ? 70 : 90;
+        const shownTitle = `🎬 ${title || '学习时间'}`;
+        ctx.fillText(shownTitle, isPortrait ? 40 : 70, titleY);
+
+        // 4. 章节圆点（右上）
+        const dotGap = 18;
+        const totalDotsW = (scenes.length - 1) * dotGap;
+        const dotStartX = canvas.width - 40 - totalDotsW;
+        for (let i = 0; i < scenes.length; i += 1) {
+          const isActive = i === sceneIdx;
+          const isPast = i < sceneIdx;
+          ctx.fillStyle = isActive ? theme.accent : isPast ? theme.accent : 'rgba(0,0,0,0.18)';
+          ctx.globalAlpha = isActive ? 1 : isPast ? 0.55 : 1;
+          ctx.beginPath();
+          ctx.arc(dotStartX + i * dotGap, titleY - 10, isActive ? 9 : 6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // 5. 主角 emoji（左侧，呼吸+张口动画）
+        const charSize = isPortrait ? 190 : 220;
+        const charBaseX = isPortrait ? 90 : 150;
+        const charBaseY = isPortrait ? canvas.height / 2 + 120 : canvas.height / 2 + 80;
+        const breathe = Math.sin(t * 2.2) * 6;
+        const mouthScale = 1 + Math.abs(Math.sin(t * 9)) * 0.05;
+        ctx.save();
+        ctx.translate(charBaseX, charBaseY + breathe);
+        ctx.scale(mouthScale, mouthScale);
+        ctx.font = `${charSize}px sans-serif`;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(character, 0, 0);
+        ctx.restore();
+        ctx.textBaseline = 'alphabetic';
+
+        // 6. 对白气泡
+        const bubbleX = charBaseX + charSize * 0.85;
+        const bubbleY = isPortrait ? canvas.height / 2 - 240 : canvas.height / 2 - 160;
+        const bubbleW = canvas.width - bubbleX - (isPortrait ? 30 : 70);
+        const bubbleH = isPortrait ? 380 : 300;
+
+        // 阴影
+        ctx.shadowColor = theme.soft;
+        ctx.shadowBlur = 24;
+        ctx.shadowOffsetY = 8;
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 26);
+        ctx.fill();
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+
+        ctx.strokeStyle = theme.accent;
+        ctx.lineWidth = 3;
+        roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 26);
+        ctx.stroke();
+
+        // 气泡指向角色的三角
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath();
+        ctx.moveTo(bubbleX, bubbleY + 90);
+        ctx.lineTo(bubbleX - 26, bubbleY + 124);
+        ctx.lineTo(bubbleX, bubbleY + 158);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = theme.accent;
+        ctx.beginPath();
+        ctx.moveTo(bubbleX, bubbleY + 90);
+        ctx.lineTo(bubbleX - 26, bubbleY + 124);
+        ctx.lineTo(bubbleX, bubbleY + 158);
+        ctx.stroke();
+
+        // 气泡内文本（逐字显现）
+        const sentence = scenes[sceneIdx] || '';
+        const maxCharsPerLine = isPortrait ? 11 : 16;
+        const wrapped: string[] = [];
+        for (let i = 0; i < sentence.length; i += maxCharsPerLine) {
+          wrapped.push(sentence.slice(i, i + maxCharsPerLine));
+        }
+        const reveal = Math.min(1, sceneProgress * 1.6);
+        const charsToShow = Math.ceil(sentence.length * reveal);
+        const fontSize = isPortrait ? 36 : 42;
+        ctx.font = `bold ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+        ctx.fillStyle = '#262626';
+        let shown = 0;
+        let lineY = bubbleY + 80;
+        for (const line of wrapped) {
+          if (shown >= charsToShow) break;
+          const lineCharCount = Math.min(line.length, charsToShow - shown);
+          const piece = line.slice(0, lineCharCount);
+          ctx.fillText(piece, bubbleX + 32, lineY);
+          shown += lineCharCount;
+          lineY += fontSize + 18;
+          if (lineY > bubbleY + bubbleH - 30) break;
         }
 
-        const visibleCount = isPortrait ? 9 : 7;
-        const startIndex = Math.max(0, Math.min(currentLineIndex - 2, lines.length - visibleCount));
-        const visibleLines = lines.slice(startIndex, startIndex + visibleCount);
-
-        ctx.font = `${isPortrait ? 34 : 38}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-        visibleLines.forEach((line, idx) => {
-          const actualIndex = startIndex + idx;
-          const y = (isPortrait ? 250 : 290) + idx * (isPortrait ? 80 : 58);
-          ctx.fillStyle = '#434343';
-          ctx.fillText(line, isPortrait ? 60 : 100, y);
-
-          if (actualIndex === currentLineIndex) {
-            const progressInLine = Math.max(0, Math.min(line.length, activeChar - consumed));
-            const highlighted = line.slice(0, progressInLine);
-            ctx.fillStyle = '#0958d9';
-            ctx.fillText(highlighted, isPortrait ? 60 : 100, y);
-          }
-        });
-
-        const barX = isPortrait ? 50 : 90;
-        const barY = isPortrait ? 1180 : 650;
-        const barW = isPortrait ? 620 : 1100;
-        const barH = 14;
-        ctx.fillStyle = '#d9d9d9';
-        ctx.fillRect(barX, barY, barW, barH);
-        ctx.fillStyle = '#1677ff';
-        ctx.fillRect(barX, barY, barW * progress, barH);
+        // 7. 底部章节序号 + 提示
+        ctx.fillStyle = theme.accent;
+        ctx.font = `bold ${isPortrait ? 24 : 28}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+        ctx.fillText(`第 ${sceneIdx + 1} / ${scenes.length} 幕`, isPortrait ? 40 : 70, canvas.height - 36);
 
         ctx.fillStyle = '#8c8c8c';
-        ctx.font = `${isPortrait ? 20 : 26}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-        ctx.fillText('AI自动生成 · 可用于家庭跟读练习', isPortrait ? 50 : 90, isPortrait ? 1230 : 690);
+        ctx.font = `${isPortrait ? 18 : 22}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+        ctx.fillText('✨ AI 动画演绎 · 边看边学', canvas.width - (isPortrait ? 260 : 320), canvas.height - 36);
+
+        // 8. 场景过渡淡入淡出
+        if (sceneProgress < 0.07) {
+          ctx.fillStyle = `rgba(255,255,255,${1 - sceneProgress / 0.07})`;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        } else if (sceneProgress > 0.93 && sceneIdx < scenes.length - 1) {
+          ctx.fillStyle = `rgba(255,255,255,${(sceneProgress - 0.93) / 0.07})`;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
 
         if (elapsed < durationMs) raf = requestAnimationFrame(draw);
       };
@@ -1099,7 +1263,6 @@ export default function AppLearning() {
       if (audioContext) {
         await audioContext.close().catch(() => undefined);
       }
-      setVideoMaterialId(null);
     }
   };
 
@@ -1514,7 +1677,30 @@ export default function AppLearning() {
             renderItem={(item) => {
               const statusMeta = TASK_STATUS_META[item.status];
               return (
-                <List.Item className="list-item-soft">
+                <List.Item
+                  className="list-item-soft"
+                  actions={[
+                    <Popconfirm
+                      key="delete"
+                      title="确认删除该任务？"
+                      description="该任务的进度记录会一并删除，不可恢复。"
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => onDeleteTask(item.id)}
+                    >
+                      <Button
+                        danger
+                        type="text"
+                        size="small"
+                        loading={deletingTaskId === item.id}
+                        disabled={deletingTaskId !== null && deletingTaskId !== item.id}
+                      >
+                        🗑️ 删除
+                      </Button>
+                    </Popconfirm>,
+                  ]}
+                >
                   <Space direction="vertical" size={4} style={{ width: '100%' }}>
                     <Space wrap>
                       <Typography.Text strong>{item.title}</Typography.Text>
@@ -1535,89 +1721,8 @@ export default function AppLearning() {
       <Card
         title={
           <Space>
-            <span className="hero-emoji" role="img" aria-label="magic">🪄</span>
-            <span>文本直出音视频（免上传）</span>
-          </Space>
-        }
-        className="app-section-card section-direct"
-      >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <div className="hero-banner hero-banner-purple">
-            <div className="hero-banner-title">📝 粘贴文字 → 🎧 听 → 🎬 看</div>
-            <div className="hero-banner-sub">把任何一段文字变成会朗读的音频和动画字幕视频，孩子立马愿意看</div>
-          </div>
-          <Input
-            value={directMediaTitle}
-            onChange={(e) => setDirectMediaTitle(e.target.value)}
-            placeholder="给你的作品起个名字～"
-            maxLength={40}
-          />
-          <Input.TextArea
-            value={directMediaText}
-            onChange={(e) => setDirectMediaText(e.target.value)}
-            placeholder="把要朗读的故事 / 课文 / 知识点粘贴到这里…"
-            autoSize={{ minRows: 4, maxRows: 10 }}
-            maxLength={2400}
-            showCount
-          />
-          <Space wrap>
-            <Button
-              type="primary"
-              onClick={() => onPlayMaterialAudio('direct-text', directMediaText)}
-              loading={speakingMaterialId === 'direct-text'}
-              disabled={!directMediaText.trim()}
-            >
-              🎙️ 朗读这段文字
-            </Button>
-            <Button
-              onClick={() => onGenerateMaterialVideo('direct-text', directMediaTitle, directMediaText, 'landscape')}
-              loading={videoMaterialId === 'direct-text-landscape'}
-              disabled={!directMediaText.trim()}
-            >
-              🖥️ 横屏视频
-            </Button>
-            <Button
-              onClick={() => onGenerateMaterialVideo('direct-text', directMediaTitle, directMediaText, 'portrait')}
-              loading={videoMaterialId === 'direct-text-portrait'}
-              disabled={!directMediaText.trim()}
-            >
-              📱 竖屏视频
-            </Button>
-          </Space>
-          {(generatedVideoUrls['direct-text-landscape'] || generatedVideoUrls['direct-text-portrait']) && (
-            <Space direction="vertical" size={10} style={{ width: '100%' }}>
-              {generatedVideoUrls['direct-text-landscape'] && (
-                <div className="media-frame video-frame">
-                  <Typography.Text type="secondary">🖥️ 横屏视频</Typography.Text>
-                  <video
-                    controls
-                    autoPlay
-                    src={generatedVideoUrls['direct-text-landscape']}
-                    style={{ width: '100%', borderRadius: 10, background: '#000' }}
-                  />
-                </div>
-              )}
-              {generatedVideoUrls['direct-text-portrait'] && (
-                <div className="media-frame video-frame">
-                  <Typography.Text type="secondary">📱 竖屏视频</Typography.Text>
-                  <video
-                    controls
-                    autoPlay
-                    src={generatedVideoUrls['direct-text-portrait']}
-                    style={{ width: '100%', maxWidth: 360, borderRadius: 10, background: '#000' }}
-                  />
-                </div>
-              )}
-            </Space>
-          )}
-        </Space>
-      </Card>
-
-      <Card
-        title={
-          <Space>
-            <span className="hero-emoji" role="img" aria-label="library">📚</span>
-            <span>资料库 · 一键上传秒变音视频</span>
+            <span className="hero-emoji" role="img" aria-label="studio">🎬</span>
+            <span>音视频创作工坊</span>
           </Space>
         }
         className="app-section-card section-materials hero-card"
@@ -1652,43 +1757,113 @@ export default function AppLearning() {
       >
         <Space direction="vertical" size={14} style={{ width: '100%' }}>
           <div className="hero-banner">
-            <div className="hero-banner-title">🎙️ 上传任何文本，秒变会读会演的音视频</div>
-            <div className="hero-banner-sub">📄 文档 · 🖼️ 图片 · 📃 PDF · 📝 文本 都行，AI 帮你读出来、演出来</div>
+            <div className="hero-banner-title">🎙️ 上传文件 或 📝 粘贴文本，都能秒变会演的音视频</div>
+            <div className="hero-banner-sub">两种方式生成的作品都会自动进入下方"作品库"，统一管理</div>
           </div>
-          <Space wrap align="center" size={10} className="upload-row">
-            <label className="file-pick-btn">
-              <span>📎 选择文件</span>
-              <input
-                type="file"
-                data-role="material-upload"
-                onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-                accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.markdown,.csv"
-              />
-            </label>
-            {uploadFile && (
-              <Tag color="blue" closable onClose={(e) => {
-                e.preventDefault();
-                setUploadFile(null);
-                const fi = document.querySelector<HTMLInputElement>('input[type="file"][data-role="material-upload"]');
-                if (fi) fi.value = '';
-              }}>
-                {uploadFile.name}
-              </Tag>
-            )}
-            <Select
-              allowClear
-              placeholder="可选：绑定孩子"
-              style={{ width: 180 }}
-              getPopupContainer={(trigger) => trigger.parentElement || document.body}
-              value={uploadChildId}
-              onChange={(v) => setUploadChildId(v)}
-              options={children.map((c) => ({ label: c.name, value: c.id }))}
-            />
-            <Button onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading || !uploadFile}>仅上传</Button>
-            <Button type="primary" size="large" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
-              ✨ 一键生成音视频
-            </Button>
-          </Space>
+
+          <Tabs
+            activeKey={createMode}
+            onChange={(k) => setCreateMode(k as 'upload' | 'paste')}
+            className="creator-tabs"
+            items={[
+              {
+                key: 'upload',
+                label: '📤 上传文件',
+                children: (
+                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                    <Space wrap align="center" size={10} className="upload-row">
+                      <label className="file-pick-btn">
+                        <span>📎 选择文件</span>
+                        <input
+                          type="file"
+                          data-role="material-upload"
+                          onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.markdown,.csv"
+                        />
+                      </label>
+                      {uploadFile && (
+                        <Tag color="blue" closable onClose={(e) => {
+                          e.preventDefault();
+                          setUploadFile(null);
+                          const fi = document.querySelector<HTMLInputElement>('input[type="file"][data-role="material-upload"]');
+                          if (fi) fi.value = '';
+                        }}>
+                          {uploadFile.name}
+                        </Tag>
+                      )}
+                      <Select
+                        allowClear
+                        placeholder="可选：绑定孩子"
+                        style={{ width: 180 }}
+                        getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                        value={uploadChildId}
+                        onChange={(v) => setUploadChildId(v)}
+                        options={children.map((c) => ({ label: c.name, value: c.id }))}
+                      />
+                      <Button onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading || !uploadFile}>仅上传</Button>
+                      <Button type="primary" size="large" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
+                        ✨ 一键生成音视频
+                      </Button>
+                    </Space>
+                  </Space>
+                ),
+              },
+              {
+                key: 'paste',
+                label: '📝 粘贴文本',
+                children: (
+                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                    <Input
+                      value={directMediaTitle}
+                      onChange={(e) => setDirectMediaTitle(e.target.value)}
+                      placeholder="给作品起个名字（用于作品库识别）"
+                      maxLength={40}
+                    />
+                    <Input.TextArea
+                      value={directMediaText}
+                      onChange={(e) => setDirectMediaText(e.target.value)}
+                      placeholder="把要朗读 / 演绎的故事 / 课文 / 知识点粘贴到这里…"
+                      autoSize={{ minRows: 4, maxRows: 10 }}
+                      maxLength={2400}
+                      showCount
+                    />
+                    <Space wrap align="center" size={10}>
+                      <Select
+                        allowClear
+                        placeholder="可选：绑定孩子"
+                        style={{ width: 180 }}
+                        getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                        value={uploadChildId}
+                        onChange={(v) => setUploadChildId(v)}
+                        options={children.map((c) => ({ label: c.name, value: c.id }))}
+                      />
+                      <Button
+                        type="primary"
+                        size="large"
+                        className="hero-cta"
+                        loading={uploading}
+                        disabled={uploading || !directMediaText.trim()}
+                        onClick={() => {
+                          const text = directMediaText.trim();
+                          if (!text) return;
+                          const titleRaw = directMediaTitle.trim() || '粘贴文本';
+                          const safeTitle = titleRaw.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || 'paste';
+                          const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+                          const file = new File([blob], `${safeTitle}.txt`, { type: 'text/plain' });
+                          void onUploadMaterial(true, file).then(() => {
+                            setDirectMediaText('');
+                            setDirectMediaTitle('家庭学习音视频');
+                          });
+                        }}
+                      >
+                        ✨ 一键生成音视频
+                      </Button>
+                    </Space>
+                  </Space>
+                ),
+              },
+            ]}
+          />
 
           {(uploading || uploadStage) && (
             <div className="upload-progress-box">
@@ -1700,6 +1875,12 @@ export default function AppLearning() {
               <div className="upload-stage-text">{uploadStage || '处理中…'}</div>
             </div>
           )}
+
+          <div className="library-divider">
+            <span className="library-divider-line" />
+            <span className="library-divider-label">🎁 作品库</span>
+            <span className="library-divider-line" />
+          </div>
 
           <List
             dataSource={materials}
@@ -1799,6 +1980,15 @@ export default function AppLearning() {
 
                     {audioReady && showAudioPlayer && (
                       <div className="media-frame audio-frame">
+                        <Button
+                          className="media-close-btn"
+                          shape="circle"
+                          size="small"
+                          onClick={() => setExpandedAudioMaterialId(null)}
+                          aria-label="收起音频"
+                        >
+                          ✕
+                        </Button>
                         <audio
                           controls
                           autoPlay={expandedAudioMaterialId === item.id}
@@ -1810,6 +2000,15 @@ export default function AppLearning() {
 
                     {videoReady && showVideoPlayer && (
                       <div className="media-frame video-frame">
+                        <Button
+                          className="media-close-btn"
+                          shape="circle"
+                          size="small"
+                          onClick={() => setExpandedVideoMaterialId(null)}
+                          aria-label="收起视频"
+                        >
+                          ✕
+                        </Button>
                         <video
                           controls
                           autoPlay={expandedVideoMaterialId === item.id}
