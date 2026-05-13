@@ -629,7 +629,9 @@ export default function AppLearning() {
     try {
       const formData = new FormData();
       formData.append('file', fileToUpload);
-      if (uploadChildId) formData.append('childId', uploadChildId);
+      // 单孩家庭：未选时默认绑定唯一孩子
+      const effectiveChildId = uploadChildId || (children.length === 1 ? children[0].id : undefined);
+      if (effectiveChildId) formData.append('childId', effectiveChildId);
       if (uploadScheduledDate && /^\d{4}-\d{2}-\d{2}$/.test(uploadScheduledDate)) {
         formData.append('scheduledDate', uploadScheduledDate);
       }
@@ -1989,15 +1991,19 @@ export default function AppLearning() {
                           {uploadFile.name}
                         </Tag>
                       )}
-                      <Select
-                        allowClear
-                        placeholder="可选：绑定孩子"
-                        style={{ width: 180 }}
-                        getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                        value={uploadChildId}
-                        onChange={(v) => setUploadChildId(v)}
-                        options={children.map((c) => ({ label: c.name, value: c.id }))}
-                      />
+                      {children.length > 1 ? (
+                        <Select
+                          allowClear
+                          placeholder="绑定孩子"
+                          style={{ width: 160 }}
+                          getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                          value={uploadChildId}
+                          onChange={(v) => setUploadChildId(v)}
+                          options={children.map((c) => ({ label: c.name, value: c.id }))}
+                        />
+                      ) : children.length === 1 ? (
+                        <Tag color="blue" style={{ padding: '4px 8px' }}>👶 {children[0].name}</Tag>
+                      ) : null}
                       <Input
                         type="date"
                         value={uploadScheduledDate}
@@ -2033,15 +2039,19 @@ export default function AppLearning() {
                       showCount
                     />
                     <Space wrap align="center" size={10}>
-                      <Select
-                        allowClear
-                        placeholder="可选：绑定孩子"
-                        style={{ width: 180 }}
-                        getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                        value={uploadChildId}
-                        onChange={(v) => setUploadChildId(v)}
-                        options={children.map((c) => ({ label: c.name, value: c.id }))}
-                      />
+                      {children.length > 1 ? (
+                        <Select
+                          allowClear
+                          placeholder="绑定孩子"
+                          style={{ width: 160 }}
+                          getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                          value={uploadChildId}
+                          onChange={(v) => setUploadChildId(v)}
+                          options={children.map((c) => ({ label: c.name, value: c.id }))}
+                        />
+                      ) : children.length === 1 ? (
+                        <Tag color="blue" style={{ padding: '4px 8px' }}>👶 {children[0].name}</Tag>
+                      ) : null}
                       <Input
                         type="date"
                         value={uploadScheduledDate}
