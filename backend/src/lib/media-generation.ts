@@ -1,5 +1,7 @@
 import { checkAndRecordBudget } from './cost-guardrails';
 
+export type MediaKind = 'audio' | 'video' | 'both';
+
 export interface MediaGenerationInput {
   parentId: string;
   materialId: string;
@@ -9,6 +11,7 @@ export interface MediaGenerationInput {
   recognitionText: string;
   category: string;
   difficulty: number;
+  mediaKind?: MediaKind;
 }
 
 export interface MediaOutputItem {
@@ -38,23 +41,29 @@ function buildLearningScript(input: MediaGenerationInput): string {
   const title = input.title.trim() || '学习任务';
   const category = input.category || '语文';
   const level = input.difficulty >= 3 ? '提升' : input.difficulty === 2 ? '基础' : '入门';
+  const mode = input.mediaKind || 'both';
 
-  const core = text ? text.slice(0, 360) : `${title}，请认真学习并完成练习。`;
+  const core = text ? text.slice(0, mode === 'audio' ? 1200 : 600) : `${title}，请认真学习并完成练习。`;
   return [
     `主题：${title}`,
     `学科：${category}`,
     `难度：${level}`,
-    `讲解：${core}`,
-    '提示：先听后读，再尝试复述一遍。',
+    mode === 'audio' ? `朗读正文：${core}` : `讲解：${core}`,
+    mode === 'video' ? '演绎提示：画面围绕正文情节进行分镜表达。' : '提示：先听后读，再尝试复述一遍。',
   ].join('\n');
+}
+
+function allowsKind(mediaKind: MediaKind, kind: 'audio' | 'video') {
+  return mediaKind === 'both' || mediaKind === kind;
 }
 
 function buildFallbackOutputs(input: MediaGenerationInput): MediaOutputItem[] {
   const outputs: MediaOutputItem[] = [];
   const fileUrl = (input.fileUrl || '').trim();
+  const mediaKind = input.mediaKind || 'both';
   if (!fileUrl) return outputs;
 
-  if (input.sourceType === 'audio') {
+  if (input.sourceType === 'audio' && allowsKind(mediaKind, 'audio')) {
     outputs.push({
       kind: 'audio',
       url: fileUrl,
@@ -64,7 +73,7 @@ function buildFallbackOutputs(input: MediaGenerationInput): MediaOutputItem[] {
     });
   }
 
-  if (input.sourceType === 'video') {
+  if (input.sourceType === 'video' && allowsKind(mediaKind, 'video')) {
     outputs.push({
       kind: 'video',
       url: fileUrl,

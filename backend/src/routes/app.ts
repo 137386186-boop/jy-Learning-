@@ -9,7 +9,7 @@ import { ArtifactType, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { requireAppParent, signAppParentToken, type AppParentTokenPayload } from '../lib/app-auth';
 import { recognizeMaterial } from '../lib/ai-recognition';
-import { generateProfessionalMedia } from '../lib/media-generation';
+import { generateProfessionalMedia, type MediaKind } from '../lib/media-generation';
 
 const router = Router();
 
@@ -58,6 +58,7 @@ const APP_TASK_CATEGORIES = ['语文', '数学', '英语', '社会科学'] as co
 const APP_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'app-library');
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_POLICY_MESSAGE = '密码至少 8 位，且需同时包含字母和数字';
+const PHONE_POLICY_MESSAGE = '手机号格式不正确，请输入 11 位手机号';
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
 
@@ -65,6 +66,11 @@ function isStrongPassword(value: string): boolean {
   const hasLetter = /[a-zA-Z]/.test(value);
   const hasNumber = /\d/.test(value);
   return value.length >= PASSWORD_MIN_LENGTH && hasLetter && hasNumber;
+}
+
+function isValidPhone(value?: string | null): boolean {
+  if (!value) return false;
+  return /^1\d{10}$/.test(value.trim());
 }
 
 function hashResetToken(rawToken: string): string {
@@ -129,25 +135,34 @@ function toNumber(value: unknown): number {
 
 router.post('/auth/register', authLimiter, async (req: Request, res: Response) => {
   try {
-    const { username, password, displayName } = req.body as {
+    const { username, password, displayName, phone } = req.body as {
       username?: string;
       password?: string;
       displayName?: string;
+      phone?: string;
     };
     const u = username?.trim();
     const p = password?.trim();
     const d = displayName?.trim() || u;
+    const normalizedPhone = phone?.trim() || null;
     if (!u || !p) {
-      res.status(400).json({ error: '请输入用户名和密码' });
+      badRequest(res, '请输入用户名和密码', {
+        username: '请输入用户名',
+        password: '请输入密码',
+      });
       return;
     }
     if (!isStrongPassword(p)) {
-      res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
+      badRequest(res, PASSWORD_POLICY_MESSAGE, { password: PASSWORD_POLICY_MESSAGE });
+      return;
+    }
+    if (normalizedPhone && !isValidPhone(normalizedPhone)) {
+      badRequest(res, PHONE_POLICY_MESSAGE, { phone: PHONE_POLICY_MESSAGE });
       return;
     }
     const existed = await prisma.appParent.findUnique({ where: { username: u } });
     if (existed) {
-      res.status(409).json({ error: '用户名已存在，请直接登录或找回密码' });
+      badRequest(res, '用户名已存在，请直接登录或找回密码', { username: '用户名已存在，请直接登录或找回密码' });
       return;
     }
     const passwordHash = await bcrypt.hash(p, 10);
@@ -157,7 +172,10 @@ router.post('/auth/register', authLimiter, async (req: Request, res: Response) =
     });
     res.status(201).json({
       ok: true,
-      message: '注册成功，请使用账号密码登录',
+      message: normalizedPhone
+        ? '注册成功（手机号已保存，短信验证能力待开通）'
+        : '注册成功，请使用账号密码登录',
+      smsVerificationStatus: normalizedPhone ? 'pending_provider' : 'not_provided',
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -171,7 +189,10 @@ router.post('/auth/login', loginLimiter, async (req: Request, res: Response) => 
     const u = username?.trim();
     const p = password?.trim();
     if (!u || !p) {
-      res.status(400).json({ error: '请输入用户名和密码' });
+      badRequest(res, '请输入用户名和密码', {
+        username: '请输入用户名',
+        password: '请输入密码',
+      });
       return;
     }
     const parent = await prisma.appParent.findUnique({ where: { username: u } });
@@ -197,7 +218,7 @@ router.post('/auth/forgot-password', authLimiter, async (req: Request, res: Resp
     const { username } = req.body as { username?: string };
     const u = username?.trim();
     if (!u) {
-      res.status(400).json({ error: '请输入用户名' });
+      badRequest(res, '请输入用户名', { username: '请输入用户名' });
       return;
     }
 
@@ -241,11 +262,14 @@ router.post('/auth/reset-password', authLimiter, async (req: Request, res: Respo
     const rawToken = token?.trim();
     const nextPassword = password?.trim();
     if (!rawToken || !nextPassword) {
-      res.status(400).json({ error: '请填写重置口令和新密码' });
+      badRequest(res, '请填写重置口令和新密码', {
+        token: '请输入重置口令',
+        password: '请输入新密码',
+      });
       return;
     }
     if (!isStrongPassword(nextPassword)) {
-      res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
+      badRequest(res, PASSWORD_POLICY_MESSAGE, { password: PASSWORD_POLICY_MESSAGE });
       return;
     }
 
@@ -506,17 +530,27 @@ router.post('/tasks', requireAppParent, writeLimiter, async (req: Request, res: 
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const { title, description, category, difficulty, childId, dueDate } = req.body as {
+    const { title, description, category, difficulty, childId, dueDate, materialId } = req.body as {
       title?: string;
       description?: string;
       category?: string;
       difficulty?: number;
       childId?: string;
       dueDate?: string;
+      materialId?: string;
     };
     const t = title?.trim();
+    const normalizedDescription = description?.trim() || '';
+    const normalizedMaterialId = materialId?.trim() || null;
     if (!t) {
       badRequest(res, '请填写任务标题', { title: '请填写任务标题' });
+      return;
+    }
+    if (!normalizedDescription && !normalizedMaterialId) {
+      badRequest(res, '请补充任务内容（填写任务说明或关联学习资料）', {
+        description: '请填写任务说明或关联学习资料',
+        materialId: '请填写任务说明或关联学习资料',
+      });
       return;
     }
 
@@ -540,6 +574,23 @@ router.post('/tasks', requireAppParent, writeLimiter, async (req: Request, res: 
       }
     }
 
+    let linkedMaterialId: string | null = null;
+    if (normalizedMaterialId) {
+      const linkedMaterial = await prisma.appArtifact.findFirst({
+        where: { id: normalizedMaterialId, parentId: payload.sub },
+        select: { id: true, childId: true },
+      });
+      if (!linkedMaterial) {
+        badRequest(res, '关联学习资料不存在或无权限访问', { materialId: '关联学习资料不存在或无权限访问' });
+        return;
+      }
+      if (childId && linkedMaterial.childId && linkedMaterial.childId !== childId) {
+        badRequest(res, '关联资料与所选孩子不一致，请重新选择', { materialId: '关联资料与所选孩子不一致，请重新选择' });
+        return;
+      }
+      linkedMaterialId = linkedMaterial.id;
+    }
+
     const created = await prisma.learningTask.create({
       data: {
         parentId: payload.sub,
@@ -557,6 +608,12 @@ router.post('/tasks', requireAppParent, writeLimiter, async (req: Request, res: 
         where: { taskId_childId: { taskId: created.id, childId: created.childId } },
         update: {},
         create: { taskId: created.id, childId: created.childId },
+      });
+    }
+    if (linkedMaterialId) {
+      await prisma.appArtifact.update({
+        where: { id: linkedMaterialId },
+        data: { taskId: created.id },
       });
     }
     res.json(created);
@@ -787,6 +844,7 @@ interface GenerateMaterialTaskParams {
   title?: string;
   category?: string;
   difficulty?: number;
+  mediaKind?: MediaKind;
 }
 
 async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams) {
@@ -807,15 +865,18 @@ async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams)
       Math.min(3, Number(params.difficulty) || Number(recognition.suggestedDifficulty) || 1)
     );
 
+    const recognitionText = String(recognition.extractedText || '').trim() || detectTextFromMaterialContent(content);
+
     const mediaGenerated = await generateProfessionalMedia({
       parentId: params.parentId,
       materialId: material.id,
       title: params.title?.trim() || `${String(content.fileName || '学习资料')}学习任务`,
       sourceType: String(content.sourceType || 'file'),
       fileUrl: String(content.fileUrl || ''),
-      recognitionText: String(recognition.extractedText || ''),
+      recognitionText,
       category: safeCategory,
       difficulty: safeDifficulty,
+      mediaKind: params.mediaKind || 'both',
     });
 
     const task = await prisma.learningTask.create({
@@ -1015,11 +1076,12 @@ router.post('/library/materials/:id/generate-task', requireAppParent, writeLimit
       return;
     }
 
-    const { childId, title, category, difficulty } = req.body as {
+    const { childId, title, category, difficulty, mediaKind } = req.body as {
       childId?: string;
       title?: string;
       category?: string;
       difficulty?: number;
+      mediaKind?: MediaKind;
     };
 
     let nextChildId: string | null = material.childId || null;
@@ -1047,10 +1109,15 @@ router.post('/library/materials/:id/generate-task', requireAppParent, writeLimit
       }
     }
 
+    const normalizedMediaKind: MediaKind = mediaKind === 'audio' || mediaKind === 'video' || mediaKind === 'both'
+      ? mediaKind
+      : 'both';
+
     const nextContent = {
       ...content,
       status: 'processing',
       mediaStatus: 'processing',
+      mediaKind: normalizedMediaKind,
       fallbackReason: null,
     } as unknown as Prisma.InputJsonValue;
 
@@ -1069,6 +1136,7 @@ router.post('/library/materials/:id/generate-task', requireAppParent, writeLimit
       title,
       category,
       difficulty,
+      mediaKind: normalizedMediaKind,
     });
 
     res.json(updated);
@@ -1092,6 +1160,91 @@ router.get('/library/materials/:id/status', requireAppParent, async (req: Reques
   }
 
   res.json(material);
+});
+
+function collectMaterialFilePaths(content: Record<string, unknown>): string[] {
+  const paths: string[] = [];
+  const main = String(content.fileUrl || '').trim();
+  if (main && main.startsWith('/uploads/')) {
+    paths.push(resolveUploadFilePath(main));
+  }
+  const mediaOutputs = Array.isArray(content.mediaOutputs) ? content.mediaOutputs : [];
+  for (const item of mediaOutputs) {
+    if (!item || typeof item !== 'object') continue;
+    const url = String((item as Record<string, unknown>).url || '').trim();
+    if (url && url.startsWith('/uploads/')) {
+      paths.push(resolveUploadFilePath(url));
+    }
+  }
+  return paths;
+}
+
+async function deleteMaterialById(materialId: string, parentId: string) {
+  const material = await prisma.appArtifact.findFirst({ where: { id: materialId, parentId } });
+  if (!material) return false;
+  const content = (material.content || {}) as Record<string, unknown>;
+  const filePaths = collectMaterialFilePaths(content);
+  await prisma.appArtifact.delete({ where: { id: material.id } });
+  for (const p of filePaths) {
+    fs.promises.unlink(p).catch(() => undefined);
+  }
+  return true;
+}
+
+router.delete('/library/materials/:id', requireAppParent, writeLimiter, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const removed = await deleteMaterialById(req.params.id, payload.sub);
+    if (!removed) {
+      res.status(404).json({ error: '未找到学习资料' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+router.post('/library/materials/cleanup', requireAppParent, writeLimiter, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const idsRaw = Array.isArray((req.body as Record<string, unknown> | undefined)?.ids)
+      ? ((req.body as Record<string, unknown>).ids as unknown[])
+      : null;
+    const where: Record<string, unknown> = { parentId: payload.sub };
+    if (idsRaw && idsRaw.length) {
+      const ids = idsRaw.map((v) => String(v || '').trim()).filter((v) => v.length > 0);
+      if (!ids.length) {
+        res.json({ ok: true, removed: 0 });
+        return;
+      }
+      where.id = { in: ids };
+    }
+    const targets = await prisma.appArtifact.findMany({ where, select: { id: true, content: true } });
+    let removed = 0;
+    for (const item of targets) {
+      const filePaths = collectMaterialFilePaths((item.content || {}) as Record<string, unknown>);
+      await prisma.appArtifact.delete({ where: { id: item.id } }).then(() => {
+        removed += 1;
+        for (const p of filePaths) {
+          fs.promises.unlink(p).catch(() => undefined);
+        }
+      }).catch(() => undefined);
+    }
+    res.json({ ok: true, removed });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
 });
 
 router.get('/progress', requireAppParent, async (req: Request, res: Response) => {

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Alert, Button, Card, Form, Input, List, Select, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Form, Input, List, Progress, Select, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
+import type { FormInstance } from 'antd';
 import dayjs from 'dayjs';
-import { APP_API_BASE, appFetch, clearAppToken, getAppToken, setAppToken } from '../api.app';
+import { APP_API_BASE, appFetch, appUpload, clearAppToken, getAppToken, setAppToken } from '../api.app';
 
 interface ParentUser {
   id: string;
@@ -104,6 +105,17 @@ const TASK_STATUS_META: Record<TaskItem['status'], { label: string; color: strin
   archived: { label: '已归档', color: 'default' },
 };
 
+const GRADE_LEVEL_LABEL: Record<string, string> = {
+  pre_k: '学前',
+  kindergarten: '幼儿园',
+  primary_prep: '幼升小',
+};
+
+function getGradeLevelLabel(value?: string | null) {
+  if (!value) return '';
+  return GRADE_LEVEL_LABEL[value] || value;
+}
+
 function getDifficultyLabel(level: number) {
   if (level === 1) return '入门';
   if (level === 2) return '基础';
@@ -147,6 +159,50 @@ function getFallbackReasonText(reason: string) {
   if (reason === 'ai_recognition_failed') return 'AI识别失败，自动回退';
   if (reason === 'media_generation_failed') return '专业媒体生成失败，自动回退';
   return reason;
+}
+
+const PASSWORD_RULE_REGEX = /^(?=.*[a-zA-Z])(?=.*\d).{8,}$/;
+const PASSWORD_RULE_TEXT = '密码至少 8 位，且需同时包含字母和数字';
+
+function getPasswordRuleChecks(password: string) {
+  const value = String(password || '');
+  return {
+    minLength: value.length >= 8,
+    hasLetter: /[a-zA-Z]/.test(value),
+    hasNumber: /\d/.test(value),
+  };
+}
+
+function renderPasswordRuleHint(password: string) {
+  const checks = getPasswordRuleChecks(password);
+  return (
+    <Space size={8} wrap>
+      <Tag color={checks.minLength ? 'success' : 'default'}>至少 8 位</Tag>
+      <Tag color={checks.hasLetter ? 'success' : 'default'}>包含字母</Tag>
+      <Tag color={checks.hasNumber ? 'success' : 'default'}>包含数字</Tag>
+    </Space>
+  );
+}
+
+function applyFieldErrors(form: FormInstance, data: unknown) {
+  if (!data || typeof data !== 'object') return;
+  const fieldErrors = (data as Record<string, unknown>).fieldErrors;
+  if (!Array.isArray(fieldErrors)) return;
+
+  const mapped = fieldErrors
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const row = item as Record<string, unknown>;
+      const field = typeof row.field === 'string' ? row.field.trim() : '';
+      const msg = typeof row.message === 'string' ? row.message.trim() : '';
+      if (!field || !msg) return null;
+      return { name: field, errors: [msg] };
+    })
+    .filter((item): item is { name: string; errors: string[] } => !!item);
+
+  if (mapped.length) {
+    form.setFields(mapped);
+  }
 }
 
 function isRecognitionLikelyTruncated(text: string) {
@@ -213,12 +269,29 @@ export default function AppLearning() {
   const [deletingChildId, setDeletingChildId] = useState<string | null>(null);
   const [materialBusyId, setMaterialBusyId] = useState<string | null>(null);
   const [materialAction, setMaterialAction] = useState<'recognize' | 'generate' | 'audio' | 'video' | null>(null);
+  const [expandedAudioMaterialId, setExpandedAudioMaterialId] = useState<string | null>(null);
+  const [expandedVideoMaterialId, setExpandedVideoMaterialId] = useState<string | null>(null);
+  const [generatedVideoUrls, setGeneratedVideoUrls] = useState<Record<string, string>>({});
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadChildId, setUploadChildId] = useState<string | undefined>(undefined);
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [uploadStage, setUploadStage] = useState<string>('');
   const [directMediaTitle, setDirectMediaTitle] = useState('家庭学习音视频');
   const [directMediaText, setDirectMediaText] = useState('');
+  const [selectedMaterialIds, setSelectedMaterialIds] = useState<string[]>([]);
+  const [deletingMaterialId, setDeletingMaterialId] = useState<string | null>(null);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [celebrate, setCelebrate] = useState(false);
 
+  const [loginForm] = Form.useForm();
+  const [forgotForm] = Form.useForm();
+  const [registerForm] = Form.useForm();
+  const [resetForm] = Form.useForm();
   const [childForm] = Form.useForm();
+  const [taskForm] = Form.useForm();
+
+  const registerPassword = Form.useWatch('password', registerForm) || '';
+  const resetPassword = Form.useWatch('password', resetForm) || '';
 
   const totalTodayTaskCount = useMemo(
     () => children.reduce((sum, child) => sum + (child.todayTaskCount ?? 0), 0),
@@ -295,16 +368,28 @@ export default function AppLearning() {
     if (token) reloadAll();
   }, [token]);
 
-  const onRegister = async (values: { username: string; password: string }) => {
+  const onRegister = async (values: { username: string; password: string; confirmPassword?: string; phone?: string }) => {
+    registerForm.setFields([
+      { name: 'username', errors: [] },
+      { name: 'password', errors: [] },
+      { name: 'confirmPassword', errors: [] },
+      { name: 'phone', errors: [] },
+    ]);
+    const payload = {
+      username: values.username,
+      password: values.password,
+      phone: values.phone?.trim() || undefined,
+    };
     setAuthSubmitting(true);
     try {
       const res = await appFetch(`${APP_API_BASE}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
+        body: JSON.stringify(payload),
       });
       const data = await parseApiResponse(res);
       if (!res.ok) {
+        applyFieldErrors(registerForm, data);
         message.error(getApiErrorMessage(data, '注册失败', res.status));
         return;
       }
@@ -315,6 +400,7 @@ export default function AppLearning() {
           res.status
         )
       );
+      registerForm.resetFields();
       setAuthMode('login');
       setLoginAssistMode('none');
     } catch {
@@ -325,6 +411,10 @@ export default function AppLearning() {
   };
 
   const onLogin = async (values: { username: string; password: string }) => {
+    loginForm.setFields([
+      { name: 'username', errors: [] },
+      { name: 'password', errors: [] },
+    ]);
     setAuthSubmitting(true);
     try {
       const res = await appFetch(`${APP_API_BASE}/auth/login`, {
@@ -334,6 +424,7 @@ export default function AppLearning() {
       });
       const data = await parseApiResponse(res);
       if (!res.ok) {
+        applyFieldErrors(loginForm, data);
         message.error(getApiErrorMessage(data, '登录失败', res.status));
         return;
       }
@@ -344,6 +435,7 @@ export default function AppLearning() {
       }
       setAppToken(tokenValue);
       setToken(tokenValue);
+      loginForm.resetFields();
       message.success('登录成功');
     } catch {
       message.error('网络异常，请稍后重试');
@@ -353,6 +445,7 @@ export default function AppLearning() {
   };
 
   const onForgotPassword = async (values: { username: string }) => {
+    forgotForm.setFields([{ name: 'username', errors: [] }]);
     setForgotSubmitting(true);
     try {
       const res = await appFetch(`${APP_API_BASE}/auth/forgot-password`, {
@@ -362,6 +455,7 @@ export default function AppLearning() {
       });
       const data = await parseApiResponse(res);
       if (!res.ok) {
+        applyFieldErrors(forgotForm, data);
         message.error(getApiErrorMessage(data, '重置口令申请失败', res.status));
         return;
       }
@@ -370,6 +464,7 @@ export default function AppLearning() {
         ? String((data as Record<string, unknown>).resetToken || '').trim()
         : '';
       setLatestResetToken(tokenValue);
+      forgotForm.resetFields();
       message.success(getApiErrorMessage(data, '如账号存在，重置口令已生成', res.status));
       setAuthMode('login');
       setLoginAssistMode('reset');
@@ -380,21 +475,32 @@ export default function AppLearning() {
     }
   };
 
-  const onResetPassword = async (values: { token: string; password: string }) => {
+  const onResetPassword = async (values: { token: string; password: string; confirmPassword?: string }) => {
+    resetForm.setFields([
+      { name: 'token', errors: [] },
+      { name: 'password', errors: [] },
+      { name: 'confirmPassword', errors: [] },
+    ]);
+    const payload = {
+      token: values.token,
+      password: values.password,
+    };
     setResetSubmitting(true);
     try {
       const res = await appFetch(`${APP_API_BASE}/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
+        body: JSON.stringify(payload),
       });
       const data = await parseApiResponse(res);
       if (!res.ok) {
+        applyFieldErrors(resetForm, data);
         message.error(getApiErrorMessage(data, '密码重置失败', res.status));
         return;
       }
       message.success(getApiErrorMessage(data, '密码已重置，请登录', res.status));
       setLatestResetToken('');
+      resetForm.resetFields();
       setAuthMode('login');
       setLoginAssistMode('none');
     } catch {
@@ -442,24 +548,39 @@ export default function AppLearning() {
 
   const onCreateTask = async (values: {
     title: string;
+    description?: string;
+    materialId?: string;
     category: string;
     difficulty?: number;
     childId?: string;
     dueDate?: string;
   }) => {
+    taskForm.setFields([
+      { name: 'title', errors: [] },
+      { name: 'description', errors: [] },
+      { name: 'materialId', errors: [] },
+      { name: 'category', errors: [] },
+    ]);
+    const payload = {
+      ...values,
+      description: values.description?.trim() || undefined,
+      materialId: values.materialId?.trim() || undefined,
+    };
     setTaskSubmitting(true);
     try {
       const res = await appFetch(`${APP_API_BASE}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
+        body: JSON.stringify(payload),
       });
       const data = await parseApiResponse(res);
       if (!res.ok) {
+        applyFieldErrors(taskForm, data);
         message.error(getApiErrorMessage(data, '创建任务失败', res.status));
         return;
       }
       message.success('任务已创建');
+      taskForm.resetFields();
       await reloadAll();
     } catch {
       message.error('创建任务失败，请稍后重试');
@@ -529,44 +650,61 @@ export default function AppLearning() {
     throw new Error(type === 'recognize' ? '识别处理中，请稍后刷新查看结果' : '任务生成处理中，请稍后刷新查看结果');
   };
 
+  const triggerCelebration = () => {
+    setCelebrate(true);
+    window.setTimeout(() => setCelebrate(false), 2400);
+  };
+
   const onUploadMaterial = async (autoGenerateTask?: boolean) => {
     if (!uploadFile) {
       message.warning('请先选择要上传的文件');
       return;
     }
     setUploading(true);
-    message.loading({ content: '资料上传中…', key: 'material-upload' });
+    setUploadPercent(0);
+    setUploadStage('📤 正在上传文件…');
     try {
       const formData = new FormData();
       formData.append('file', uploadFile);
       if (uploadChildId) formData.append('childId', uploadChildId);
-      const res = await appFetch(`${APP_API_BASE}/library/materials`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await parseApiResponse(res);
-      if (!res.ok) {
-        message.error({ content: getApiErrorMessage(data, '上传失败', res.status), key: 'material-upload' });
+
+      const uploadRes = await appUpload(
+        `${APP_API_BASE}/library/materials`,
+        formData,
+        (percent) => {
+          setUploadPercent(percent);
+          if (percent < 30) setUploadStage('📤 正在传输到云端…');
+          else if (percent < 70) setUploadStage('🚀 文件飞奔中…');
+          else setUploadStage('🧠 即将进入 AI 大脑…');
+        }
+      );
+
+      if (!uploadRes.ok) {
+        setUploadStage('');
+        setUploadPercent(0);
+        message.error(getApiErrorMessage(uploadRes.data, '上传失败', uploadRes.status));
         return;
       }
 
-      const uploaded = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
+      setUploadPercent(100);
+      const uploaded = uploadRes.data && typeof uploadRes.data === 'object' ? (uploadRes.data as Record<string, unknown>) : null;
       const uploadedMaterialId = uploaded && typeof uploaded.id === 'string' ? uploaded.id : null;
 
       if (autoGenerateTask && uploadedMaterialId) {
-        message.loading({ content: '上传成功，正在自动识别并生成任务…', key: 'material-upload' });
+        setUploadStage('🔍 AI 正在阅读资料内容…');
         const recognizeRes = await appFetch(`${APP_API_BASE}/library/materials/${uploadedMaterialId}/recognize`, {
           method: 'POST',
         });
         const recognizeData = await parseApiResponse(recognizeRes);
         if (!recognizeRes.ok) {
-          message.error({ content: getApiErrorMessage(recognizeData, '上传成功，但自动识别失败', recognizeRes.status), key: 'material-upload' });
+          message.error(getApiErrorMessage(recognizeData, '上传成功，但自动识别失败', recognizeRes.status));
           await reloadAll();
           return;
         }
 
         await pollMaterialUntilDone(uploadedMaterialId, 'recognize');
 
+        setUploadStage('🎬 AI 正在生成音视频…');
         const generateRes = await appFetch(`${APP_API_BASE}/library/materials/${uploadedMaterialId}/generate-task`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -574,25 +712,84 @@ export default function AppLearning() {
         });
         const generateData = await parseApiResponse(generateRes);
         if (!generateRes.ok) {
-          message.error({ content: getApiErrorMessage(generateData, '上传成功，但自动生成任务失败', generateRes.status), key: 'material-upload' });
+          message.error(getApiErrorMessage(generateData, '上传成功，但自动生成任务失败', generateRes.status));
           await reloadAll();
           return;
         }
 
         await pollMaterialUntilDone(uploadedMaterialId, 'generate');
-        message.success({ content: '上传成功，已自动识别并生成任务', key: 'material-upload' });
+        setUploadStage('🎉 生成完成！');
+        message.success('上传成功，已自动识别并生成');
+        if (uploadedMaterialId) {
+          setExpandedAudioMaterialId(uploadedMaterialId);
+          setExpandedVideoMaterialId(uploadedMaterialId);
+        }
+        triggerCelebration();
       } else {
-        message.success({ content: '资料上传成功，已进入资料库', key: 'material-upload' });
+        setUploadStage('✅ 上传成功');
+        message.success('资料已加入资料库');
       }
 
       setUploadFile(null);
       setUploadChildId(undefined);
+      const fileInput = document.querySelector<HTMLInputElement>('input[type="file"][data-role="material-upload"]');
+      if (fileInput) fileInput.value = '';
       await reloadAll();
     } catch (e) {
-      message.error({ content: e instanceof Error ? e.message : '上传失败，请稍后重试', key: 'material-upload' });
+      message.error(e instanceof Error ? e.message : '上传失败，请稍后重试');
       await reloadAll();
     } finally {
       setUploading(false);
+      window.setTimeout(() => {
+        setUploadPercent(0);
+        setUploadStage('');
+      }, 1500);
+    }
+  };
+
+  const onDeleteMaterial = async (materialId: string) => {
+    setDeletingMaterialId(materialId);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/library/materials/${materialId}`, {
+        method: 'DELETE',
+      });
+      const data = await parseApiResponse(res);
+      if (!res.ok) {
+        message.error(getApiErrorMessage(data, '删除资料失败', res.status));
+        return;
+      }
+      setSelectedMaterialIds((prev) => prev.filter((id) => id !== materialId));
+      message.success('已删除');
+      await reloadAll();
+    } catch {
+      message.error('删除失败，请稍后重试');
+    } finally {
+      setDeletingMaterialId(null);
+    }
+  };
+
+  const onCleanupMaterials = async (ids?: string[]) => {
+    setCleanupBusy(true);
+    try {
+      const payload = ids && ids.length ? { ids } : {};
+      const res = await appFetch(`${APP_API_BASE}/library/materials/cleanup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await parseApiResponse(res);
+      if (!res.ok) {
+        message.error(getApiErrorMessage(data, '清理失败', res.status));
+        return;
+      }
+      const removed = data && typeof data === 'object' ? Number((data as Record<string, unknown>).removed || 0) : 0;
+      message.success(removed > 0 ? `已清理 ${removed} 条资料` : '没有需要清理的资料');
+      setSelectedMaterialIds([]);
+      await reloadAll();
+    } catch {
+      message.error('清理失败，请稍后重试');
+    } finally {
+      setCleanupBusy(false);
     }
   };
 
@@ -640,28 +837,31 @@ export default function AppLearning() {
 
       if (kind === 'audio') {
         if (parsed.audioUrl) {
-          window.open(resolveAssetUrl(parsed.audioUrl), '_blank', 'noopener,noreferrer');
-          message.success('音频已生成，可在线查看');
+          setExpandedAudioMaterialId(materialId);
+          message.success('音频已生成，可直接在线播放');
           return;
         }
         if (parsed.recognitionText) {
           await onPlayMaterialAudio(materialId, parsed.recognitionText);
           return;
         }
-        message.success('音频生成完成，请刷新后查看');
+        message.warning('暂未获得音频地址，请稍后重试');
         return;
       }
 
       if (parsed.videoUrl) {
-        window.open(resolveAssetUrl(parsed.videoUrl), '_blank', 'noopener,noreferrer');
-        message.success('视频已生成，可在线查看');
+        setExpandedVideoMaterialId(materialId);
+        message.success('视频已生成，可直接在线播放');
         return;
       }
       if (parsed.recognitionText) {
-        await onGenerateMaterialVideo(materialId, parsed.fileName, parsed.recognitionText, 'landscape');
-        return;
+        const localVideoUrl = await onGenerateMaterialVideo(materialId, parsed.fileName, parsed.recognitionText, 'landscape');
+        if (localVideoUrl) {
+          setExpandedVideoMaterialId(materialId);
+          return;
+        }
       }
-      message.success('视频生成完成，请刷新后查看');
+      message.warning('暂未获得视频地址，请稍后重试');
     } catch (e) {
       message.error(e instanceof Error ? e.message : kind === 'audio' ? '音频生成失败，请稍后重试' : '视频生成失败，请稍后重试');
       await reloadAll();
@@ -708,15 +908,15 @@ export default function AppLearning() {
     title: string,
     text: string,
     orientation: 'landscape' | 'portrait'
-  ) => {
+  ): Promise<string | null> => {
     const content = text.trim();
     if (!content) {
       message.warning('请先完成识别，拿到文本后再生成视频');
-      return;
+      return null;
     }
     if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined' || typeof AudioContext === 'undefined') {
       message.error('当前浏览器不支持视频生成');
-      return;
+      return null;
     }
 
     const isPortrait = orientation === 'portrait';
@@ -727,7 +927,7 @@ export default function AppLearning() {
     const ctx = canvas.getContext('2d');
     if (!ctx || typeof canvas.captureStream !== 'function') {
       message.error('当前设备不支持视频导出');
-      return;
+      return null;
     }
 
     const maxCharsPerLine = isPortrait ? 14 : 22;
@@ -876,17 +1076,25 @@ export default function AppLearning() {
 
       const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${(title || '学习资料').replace(/\s+/g, '_')}-${isPortrait ? '竖屏' : '横屏'}学习视频.webm`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      if (materialId === 'direct-text') {
+        setGeneratedVideoUrls((prev) => ({
+          ...prev,
+          [`direct-text-${orientation}`]: url,
+        }));
+      } else {
+        setGeneratedVideoUrls((prev) => ({
+          ...prev,
+          [materialId]: url,
+        }));
+        setExpandedVideoMaterialId(materialId);
+      }
+      triggerCelebration();
 
-      message.success({ content: `${isPortrait ? '竖屏' : '横屏'}视频生成完成，已开始下载`, key: `video-${videoKey}` });
+      message.success({ content: `${isPortrait ? '竖屏' : '横屏'}视频生成完成，可直接在线播放`, key: `video-${videoKey}` });
+      return url;
     } catch {
       message.error({ content: '视频生成失败，请稍后重试', key: `video-${videoKey}` });
+      return null;
     } finally {
       if (audioContext) {
         await audioContext.close().catch(() => undefined);
@@ -897,8 +1105,8 @@ export default function AppLearning() {
 
   if (!token) {
     return (
-      <div style={{ minHeight: '70vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Card style={{ width: '100%', maxWidth: 460 }}>
+      <div className="auth-shell">
+        <Card className="auth-card">
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             <Alert
               type="info"
@@ -919,7 +1127,7 @@ export default function AppLearning() {
                   label: '登录',
                   children: (
                     <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                      <Form layout="vertical" onFinish={onLogin} autoComplete="on">
+                      <Form form={loginForm} layout="vertical" onFinish={onLogin} autoComplete="on">
                         <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
                           <Input placeholder="请输入用户名" autoComplete="username" />
                         </Form.Item>
@@ -938,10 +1146,10 @@ export default function AppLearning() {
                       )}
 
                       {loginAssistMode === 'forgot' && (
-                        <Card size="small" title="找回密码" style={{ background: '#fafafa' }}>
+                        <Card size="small" title="找回密码" className="auth-assist-card">
                           <Space direction="vertical" size={8} style={{ width: '100%' }}>
                             <Typography.Text type="secondary">输入用户名后可生成一次性重置口令（有效期 30 分钟）。</Typography.Text>
-                            <Form layout="vertical" onFinish={onForgotPassword} autoComplete="off">
+                            <Form form={forgotForm} layout="vertical" onFinish={onForgotPassword} autoComplete="off">
                               <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
                                 <Input placeholder="请输入用户名" autoComplete="username" />
                               </Form.Item>
@@ -955,7 +1163,7 @@ export default function AppLearning() {
                       )}
 
                       {loginAssistMode === 'reset' && (
-                        <Card size="small" title="重置密码" style={{ background: '#fafafa' }}>
+                        <Card size="small" title="重置密码" className="auth-assist-card">
                           <Space direction="vertical" size={8} style={{ width: '100%' }}>
                             {latestResetToken && (
                               <Alert
@@ -965,7 +1173,7 @@ export default function AppLearning() {
                                 description={<Typography.Text copyable>{latestResetToken}</Typography.Text>}
                               />
                             )}
-                            <Form layout="vertical" onFinish={onResetPassword} autoComplete="off">
+                            <Form form={resetForm} layout="vertical" onFinish={onResetPassword} autoComplete="off">
                               <Form.Item label="重置口令" name="token" rules={[{ required: true, message: '请输入重置口令' }]}>
                                 <Input placeholder="请输入重置口令" />
                               </Form.Item>
@@ -974,10 +1182,30 @@ export default function AppLearning() {
                                 name="password"
                                 rules={[
                                   { required: true, message: '请输入新密码' },
-                                  { pattern: /^(?=.*[a-zA-Z])(?=.*\d).{8,}$/, message: '密码至少 8 位，且需同时包含字母和数字' },
+                                  { pattern: PASSWORD_RULE_REGEX, message: PASSWORD_RULE_TEXT },
                                 ]}
                               >
                                 <Input.Password placeholder="请输入新密码" autoComplete="new-password" />
+                              </Form.Item>
+                              <Typography.Text type="secondary">密码强度校验</Typography.Text>
+                              {renderPasswordRuleHint(resetPassword)}
+                              <Form.Item
+                                label="确认新密码"
+                                name="confirmPassword"
+                                dependencies={['password']}
+                                rules={[
+                                  { required: true, message: '请再次输入新密码' },
+                                  ({ getFieldValue }) => ({
+                                    validator(_, value) {
+                                      if (!value || getFieldValue('password') === value) {
+                                        return Promise.resolve();
+                                      }
+                                      return Promise.reject(new Error('两次输入的密码不一致'));
+                                    },
+                                  }),
+                                ]}
+                              >
+                                <Input.Password placeholder="请再次输入新密码" autoComplete="new-password" />
                               </Form.Item>
                               <Space style={{ width: '100%', justifyContent: 'space-between' }}>
                                 <Button htmlType="submit" loading={resetSubmitting} type="primary">提交重置</Button>
@@ -994,7 +1222,7 @@ export default function AppLearning() {
                   key: 'register',
                   label: '注册',
                   children: (
-                    <Form layout="vertical" onFinish={onRegister} autoComplete="on">
+                    <Form form={registerForm} layout="vertical" onFinish={onRegister} autoComplete="on">
                       <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
                         <Input placeholder="请输入用户名" autoComplete="username" />
                       </Form.Item>
@@ -1003,10 +1231,48 @@ export default function AppLearning() {
                         name="password"
                         rules={[
                           { required: true, message: '请输入密码' },
-                          { pattern: /^(?=.*[a-zA-Z])(?=.*\d).{8,}$/, message: '密码至少 8 位，且需同时包含字母和数字' },
+                          { pattern: PASSWORD_RULE_REGEX, message: PASSWORD_RULE_TEXT },
                         ]}
                       >
                         <Input.Password placeholder="请输入密码" autoComplete="new-password" />
+                      </Form.Item>
+                      <Typography.Text type="secondary">密码强度校验</Typography.Text>
+                      {renderPasswordRuleHint(registerPassword)}
+                      <Form.Item
+                        label="确认密码"
+                        name="confirmPassword"
+                        dependencies={['password']}
+                        rules={[
+                          { required: true, message: '请再次输入密码' },
+                          ({ getFieldValue }) => ({
+                            validator(_, value) {
+                              if (!value || getFieldValue('password') === value) {
+                                return Promise.resolve();
+                              }
+                              return Promise.reject(new Error('两次输入的密码不一致'));
+                            },
+                          }),
+                        ]}
+                      >
+                        <Input.Password placeholder="请再次输入密码" autoComplete="new-password" />
+                      </Form.Item>
+                      <Form.Item
+                        label="手机号（选填）"
+                        name="phone"
+                        rules={[
+                          {
+                            validator(_, value) {
+                              const phone = String(value || '').trim();
+                              if (!phone || /^1\d{10}$/.test(phone)) {
+                                return Promise.resolve();
+                              }
+                              return Promise.reject(new Error('手机号格式不正确，请输入 11 位手机号'));
+                            },
+                          },
+                        ]}
+                        extra="短信验证能力将按配置逐步开启，当前注册后会提示状态。"
+                      >
+                        <Input placeholder="请输入 11 位手机号" autoComplete="tel" maxLength={11} />
                       </Form.Item>
                       <Button type="primary" htmlType="submit" loading={authSubmitting} block>
                         注册
@@ -1023,44 +1289,49 @@ export default function AppLearning() {
   }
 
   return (
-    <div className="app-learning-shell" style={{
-      background: 'linear-gradient(180deg, #f0f7ff 0%, #f7faff 45%, #ffffff 100%)',
-      borderRadius: 20,
-      padding: 16,
-    }}>
+    <div className="app-page-shell app-learning-shell">
+      {celebrate && (
+        <div className="celebrate-overlay" aria-hidden="true">
+          {Array.from({ length: 24 }).map((_, i) => (
+            <span key={i} className={`confetti confetti-${i % 6}`} style={{ left: `${(i * 4.2) % 100}%`, animationDelay: `${(i % 8) * 0.05}s` }}>
+              {['🎉', '✨', '🎊', '⭐', '🌟', '💫'][i % 6]}
+            </span>
+          ))}
+        </div>
+      )}
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card
         loading={loading}
-        title={<Typography.Text strong style={{ fontSize: 18, color: '#1d39c4' }}>家长学习中心</Typography.Text>}
+        className="app-main-card"
+        title={<Typography.Text strong style={{ fontSize: 18 }}>家长学习中心</Typography.Text>}
         extra={<Button onClick={() => { clearAppToken(); setToken(null); setMe(null); }}>退出</Button>}
-        style={{ borderRadius: 16, borderColor: '#adc6ff' }}
-        bodyStyle={{ background: '#f9fbff' }}
-      >        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Paragraph style={{ marginBottom: 0 }}>
             当前家长：<strong>{me?.displayName || me?.username || '未命名家长'}</strong>
           </Typography.Paragraph>
-          <Space wrap size={12}>
-            <Card size="small" style={{ minWidth: 140 }}>
+          <div className="stats-grid">
+            <Card size="small" className="metric-card">
               <Typography.Text type="secondary">孩子数</Typography.Text>
               <Typography.Title level={4} style={{ margin: 0 }}>{children.length}</Typography.Title>
             </Card>
-            <Card size="small" style={{ minWidth: 140 }}>
+            <Card size="small" className="metric-card">
               <Typography.Text type="secondary">任务总数</Typography.Text>
               <Typography.Title level={4} style={{ margin: 0 }}>{tasks.length}</Typography.Title>
             </Card>
-            <Card size="small" style={{ minWidth: 140 }}>
+            <Card size="small" className="metric-card">
               <Typography.Text type="secondary">今日任务</Typography.Text>
               <Typography.Title level={4} style={{ margin: 0 }}>{totalTodayTaskCount}</Typography.Title>
             </Card>
-            <Card size="small" style={{ minWidth: 140 }}>
+            <Card size="small" className="metric-card">
               <Typography.Text type="secondary">本周完成</Typography.Text>
               <Typography.Title level={4} style={{ margin: 0 }}>{totalWeeklyDoneCount}</Typography.Title>
             </Card>
-            <Card size="small" style={{ minWidth: 140 }}>
+            <Card size="small" className="metric-card">
               <Typography.Text type="secondary">资料总数</Typography.Text>
               <Typography.Title level={4} style={{ margin: 0 }}>{materials.length}</Typography.Title>
             </Card>
-          </Space>
+          </div>
           {children.length === 0 && tasks.length === 0 ? (
             <Alert
               showIcon
@@ -1072,7 +1343,7 @@ export default function AppLearning() {
         </Space>
       </Card>
 
-      <Card title="孩子档案管理" style={{ borderRadius: 16, borderColor: '#b7eb8f' }} bodyStyle={{ background: '#fcfff6' }}>
+      <Card title="孩子档案管理" className="app-section-card section-children">
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Form layout="inline" form={childForm} onFinish={onCreateChild}>
             <Form.Item name="name" rules={[{ required: true, message: '请输入孩子姓名' }]}>
@@ -1098,7 +1369,7 @@ export default function AppLearning() {
             dataSource={children}
             locale={{ emptyText: '暂无孩子档案' }}
             renderItem={(item) => (
-              <List.Item
+              <List.Item className="list-item-soft"
                 actions={[
                   <Link key="today" to={`/child/${item.id}/today`}>今日任务</Link>,
                   <Link key="report" to={`/reports/${item.id}`}>学习报告</Link>,
@@ -1127,7 +1398,7 @@ export default function AppLearning() {
                 <Space direction="vertical" size={4} style={{ width: '100%' }}>
                   <Space wrap>
                     <Typography.Text strong>{item.name}</Typography.Text>
-                    {item.gradeLevel && <Tag color="blue">{item.gradeLevel}</Tag>}
+                    {item.gradeLevel && <Tag className="grade-tag">{getGradeLevelLabel(item.gradeLevel)}</Tag>}
                     {item.birthDate && <Typography.Text type="secondary">{dayjs(item.birthDate).format('YYYY-MM-DD')}</Typography.Text>}
                   </Space>
                   <Space size={8} wrap>
@@ -1144,11 +1415,59 @@ export default function AppLearning() {
         </Space>
       </Card>
 
-      <Card title="学习任务管理" style={{ borderRadius: 16, borderColor: '#ffd591' }} bodyStyle={{ background: '#fffaf3' }}>
+      <Card title="学习任务管理" className="app-section-card section-tasks">
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Form layout="inline" onFinish={onCreateTask}>
+          <Form layout="inline" form={taskForm} onFinish={onCreateTask}>
             <Form.Item name="title" rules={[{ required: true, message: '请输入任务标题' }]}>
               <Input placeholder="任务标题" />
+            </Form.Item>
+            <Form.Item
+              name="description"
+              rules={[
+                {
+                  validator(_, value) {
+                    const materialId = String(taskForm.getFieldValue('materialId') || '').trim();
+                    const description = String(value || '').trim();
+                    if (description || materialId) {
+                      return Promise.resolve();
+                    }
+                    return Promise.reject(new Error('请填写任务说明或关联学习资料'));
+                  },
+                },
+              ]}
+            >
+              <Input placeholder="任务说明（与资料二选一）" style={{ width: 220 }} />
+            </Form.Item>
+            <Form.Item
+              name="materialId"
+              dependencies={['description']}
+              rules={[
+                {
+                  validator(_, value) {
+                    const materialId = String(value || '').trim();
+                    const description = String(taskForm.getFieldValue('description') || '').trim();
+                    if (description || materialId) {
+                      return Promise.resolve();
+                    }
+                    return Promise.reject(new Error('请填写任务说明或关联学习资料'));
+                  },
+                },
+              ]}
+            >
+              <Select
+                allowClear
+                showSearch
+                placeholder="关联学习资料（与说明二选一）"
+                style={{ width: 240 }}
+                getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                options={materials.map((m) => {
+                  const parsed = parseMaterialContent(m.content);
+                  return {
+                    label: parsed.fileName,
+                    value: m.id,
+                  };
+                })}
+              />
             </Form.Item>
             <Form.Item name="category" rules={[{ required: true, message: '请选择任务分类' }]}>
               <Select
@@ -1195,7 +1514,7 @@ export default function AppLearning() {
             renderItem={(item) => {
               const statusMeta = TASK_STATUS_META[item.status];
               return (
-                <List.Item>
+                <List.Item className="list-item-soft">
                   <Space direction="vertical" size={4} style={{ width: '100%' }}>
                     <Space wrap>
                       <Typography.Text strong>{item.title}</Typography.Text>
@@ -1213,65 +1532,149 @@ export default function AppLearning() {
         </Space>
       </Card>
 
-      <Card title="文本直出音视频（免上传）" style={{ borderRadius: 16, borderColor: '#d3adf7' }} bodyStyle={{ background: '#fcf5ff' }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Alert
-            showIcon
-            type="success"
-            message="直接粘贴文本，一键生成音频/视频"
-            description="适合临时练习，不依赖文件上传。"
-          />
+      <Card
+        title={
+          <Space>
+            <span className="hero-emoji" role="img" aria-label="magic">🪄</span>
+            <span>文本直出音视频（免上传）</span>
+          </Space>
+        }
+        className="app-section-card section-direct"
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div className="hero-banner hero-banner-purple">
+            <div className="hero-banner-title">📝 粘贴文字 → 🎧 听 → 🎬 看</div>
+            <div className="hero-banner-sub">把任何一段文字变成会朗读的音频和动画字幕视频，孩子立马愿意看</div>
+          </div>
           <Input
             value={directMediaTitle}
             onChange={(e) => setDirectMediaTitle(e.target.value)}
-            placeholder="请输入标题（用于视频文件名）"
+            placeholder="给你的作品起个名字～"
             maxLength={40}
           />
           <Input.TextArea
             value={directMediaText}
             onChange={(e) => setDirectMediaText(e.target.value)}
-            placeholder="请粘贴要朗读或生成视频的文本"
+            placeholder="把要朗读的故事 / 课文 / 知识点粘贴到这里…"
             autoSize={{ minRows: 4, maxRows: 10 }}
             maxLength={2400}
             showCount
           />
           <Space wrap>
             <Button
+              type="primary"
               onClick={() => onPlayMaterialAudio('direct-text', directMediaText)}
               loading={speakingMaterialId === 'direct-text'}
+              disabled={!directMediaText.trim()}
             >
-              生成音频
+              🎙️ 朗读这段文字
             </Button>
             <Button
               onClick={() => onGenerateMaterialVideo('direct-text', directMediaTitle, directMediaText, 'landscape')}
               loading={videoMaterialId === 'direct-text-landscape'}
+              disabled={!directMediaText.trim()}
             >
-              生成横屏视频
+              🖥️ 横屏视频
             </Button>
             <Button
               onClick={() => onGenerateMaterialVideo('direct-text', directMediaTitle, directMediaText, 'portrait')}
               loading={videoMaterialId === 'direct-text-portrait'}
+              disabled={!directMediaText.trim()}
             >
-              生成竖屏视频
+              📱 竖屏视频
             </Button>
           </Space>
+          {(generatedVideoUrls['direct-text-landscape'] || generatedVideoUrls['direct-text-portrait']) && (
+            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+              {generatedVideoUrls['direct-text-landscape'] && (
+                <div className="media-frame video-frame">
+                  <Typography.Text type="secondary">🖥️ 横屏视频</Typography.Text>
+                  <video
+                    controls
+                    autoPlay
+                    src={generatedVideoUrls['direct-text-landscape']}
+                    style={{ width: '100%', borderRadius: 10, background: '#000' }}
+                  />
+                </div>
+              )}
+              {generatedVideoUrls['direct-text-portrait'] && (
+                <div className="media-frame video-frame">
+                  <Typography.Text type="secondary">📱 竖屏视频</Typography.Text>
+                  <video
+                    controls
+                    autoPlay
+                    src={generatedVideoUrls['direct-text-portrait']}
+                    style={{ width: '100%', maxWidth: 360, borderRadius: 10, background: '#000' }}
+                  />
+                </div>
+              )}
+            </Space>
+          )}
         </Space>
       </Card>
 
-      <Card title="共享资料库（上传→生成音频/视频）" style={{ borderRadius: 16, borderColor: '#91d5ff' }} bodyStyle={{ background: '#f2fbff' }}>
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Alert
-            showIcon
-            type="info"
-            message="支持图片/视频/音频/PDF/Office/文本上传"
-            description="上传后可在线查看、下载，并可一键生成音频或视频。"
-          />
-          <Space wrap>
-            <input
-              type="file"
-              onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-              accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.markdown,.csv"
-            />
+      <Card
+        title={
+          <Space>
+            <span className="hero-emoji" role="img" aria-label="library">📚</span>
+            <span>资料库 · 一键上传秒变音视频</span>
+          </Space>
+        }
+        className="app-section-card section-materials hero-card"
+        extra={
+          materials.length > 0 ? (
+            <Space>
+              {selectedMaterialIds.length > 0 && (
+                <Popconfirm
+                  title={`确认删除已选 ${selectedMaterialIds.length} 条资料？`}
+                  description="将连同生成的音视频一起删除，不可恢复。"
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => onCleanupMaterials(selectedMaterialIds)}
+                >
+                  <Button danger size="small" loading={cleanupBusy}>批量删除 ({selectedMaterialIds.length})</Button>
+                </Popconfirm>
+              )}
+              <Popconfirm
+                title="确认清空全部资料？"
+                description="将删除所有上传的资料及其生成的音视频，不可恢复。"
+                okText="确认清空"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => onCleanupMaterials()}
+              >
+                <Button danger type="text" size="small" loading={cleanupBusy}>🧹 清空全部</Button>
+              </Popconfirm>
+            </Space>
+          ) : null
+        }
+      >
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <div className="hero-banner">
+            <div className="hero-banner-title">🎙️ 上传任何文本，秒变会读会演的音视频</div>
+            <div className="hero-banner-sub">📄 文档 · 🖼️ 图片 · 📃 PDF · 📝 文本 都行，AI 帮你读出来、演出来</div>
+          </div>
+          <Space wrap align="center" size={10} className="upload-row">
+            <label className="file-pick-btn">
+              <span>📎 选择文件</span>
+              <input
+                type="file"
+                data-role="material-upload"
+                onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.markdown,.csv"
+              />
+            </label>
+            {uploadFile && (
+              <Tag color="blue" closable onClose={(e) => {
+                e.preventDefault();
+                setUploadFile(null);
+                const fi = document.querySelector<HTMLInputElement>('input[type="file"][data-role="material-upload"]');
+                if (fi) fi.value = '';
+              }}>
+                {uploadFile.name}
+              </Tag>
+            )}
             <Select
               allowClear
               placeholder="可选：绑定孩子"
@@ -1281,91 +1684,184 @@ export default function AppLearning() {
               onChange={(v) => setUploadChildId(v)}
               options={children.map((c) => ({ label: c.name, value: c.id }))}
             />
-            <Button type="primary" onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading}>上传资料</Button>
-            <Button onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading}>一键上传并生成任务</Button>
+            <Button onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading || !uploadFile}>仅上传</Button>
+            <Button type="primary" size="large" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
+              ✨ 一键生成音视频
+            </Button>
           </Space>
+
+          {(uploading || uploadStage) && (
+            <div className="upload-progress-box">
+              <Progress
+                percent={uploadPercent}
+                status={uploadPercent >= 100 ? 'success' : 'active'}
+                strokeColor={{ from: '#1677ff', to: '#9254de' }}
+              />
+              <div className="upload-stage-text">{uploadStage || '处理中…'}</div>
+            </div>
+          )}
 
           <List
             dataSource={materials}
-            locale={{ emptyText: '暂无共享资料' }}
+            locale={{
+              emptyText: (
+                <div className="empty-state">
+                  <div className="empty-state-emoji">🎈</div>
+                  <div className="empty-state-title">资料库还空空的</div>
+                  <div className="empty-state-sub">挑一份文档或图片，AI 帮你变成会读会演的音视频～</div>
+                </div>
+              ),
+            }}
             renderItem={(item) => {
               const parsed = parseMaterialContent(item.content);
               const materialStatus = getMaterialStatusMeta(parsed.status);
               const fileHref = parsed.fileUrl ? resolveAssetUrl(parsed.fileUrl) : '';
+              const resolvedAudioUrl = parsed.audioUrl ? resolveAssetUrl(parsed.audioUrl) : '';
+              const resolvedVideoUrl = parsed.videoUrl ? resolveAssetUrl(parsed.videoUrl) : '';
+              const localVideoUrl = generatedVideoUrls[item.id] || '';
+              const playableVideoUrl = resolvedVideoUrl || localVideoUrl;
               const isGeneratingAudio = materialBusyId === item.id && materialAction === 'audio';
               const isGeneratingVideo = materialBusyId === item.id && materialAction === 'video';
               const isAnyGenerating = materialBusyId === item.id;
+              const hasFallbackAudio = parsed.mediaStatus === 'fallback' && !resolvedAudioUrl && !!parsed.recognitionText;
+              const hasFallbackVideo = parsed.mediaStatus === 'fallback' && !playableVideoUrl;
+              const audioReady = !!resolvedAudioUrl;
+              const videoReady = !!playableVideoUrl;
+              const showAudioPlayer = audioReady && expandedAudioMaterialId === item.id;
+              const showVideoPlayer = videoReady && expandedVideoMaterialId === item.id;
+              const lowerName = parsed.fileName.toLowerCase();
+              const sourceEmoji = parsed.sourceType === 'image' ? '🖼️'
+                : parsed.sourceType === 'video' ? '🎬'
+                : parsed.sourceType === 'audio' ? '🎧'
+                : lowerName.endsWith('.pdf') ? '📕'
+                : /\.(doc|docx|ppt|pptx|xls|xlsx)$/.test(lowerName) ? '📄'
+                : /\.(txt|md|markdown|csv)$/.test(lowerName) ? '📝'
+                : '📦';
+              const isSelected = selectedMaterialIds.includes(item.id);
               return (
-                <List.Item className="material-list-item">
+                <List.Item className="list-item-soft material-list-item">
                   <Space direction="vertical" size={8} style={{ width: '100%' }}>
                     <div className="material-header-row">
-                      <Space wrap size={6}>
+                      <Space wrap size={8}>
+                        <Checkbox
+                          checked={isSelected}
+                          onChange={(e) => {
+                            setSelectedMaterialIds((prev) =>
+                              e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id)
+                            );
+                          }}
+                        />
+                        <span className="material-emoji">{sourceEmoji}</span>
                         <Typography.Text strong>{parsed.fileName}</Typography.Text>
                         <Tag color={materialStatus.color}>{materialStatus.label}</Tag>
-                        <Tag>{parsed.sourceType}</Tag>
+                        {audioReady && <Tag color="purple">🎧 音频就绪</Tag>}
+                        {videoReady && <Tag color="magenta">🎬 视频就绪</Tag>}
                         {(() => {
                           const aiMeta = getAiStageMeta(parsed.recognitionStatus, parsed.mediaStatus);
                           return aiMeta ? <Tag color={aiMeta.color}>{aiMeta.label}</Tag> : null;
                         })()}
-                        {item.childId ? <Tag color="blue">已绑定孩子</Tag> : <Tag>未绑定孩子</Tag>}
+                        {item.childId ? <Tag color="blue">已绑定孩子</Tag> : null}
                         {isRecognitionLikelyTruncated(parsed.recognitionText) && <Tag color="gold">识别内容已截断</Tag>}
                       </Space>
+                      <Popconfirm
+                        title="确认删除该资料？"
+                        description="将连同生成的音视频一起删除，不可恢复。"
+                        okText="删除"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={() => onDeleteMaterial(item.id)}
+                      >
+                        <Button
+                          danger
+                          type="text"
+                          size="small"
+                          loading={deletingMaterialId === item.id}
+                          disabled={deletingMaterialId !== null && deletingMaterialId !== item.id}
+                        >
+                          🗑️ 删除
+                        </Button>
+                      </Popconfirm>
                     </div>
 
                     <div className="material-meta-row">
-                      <Typography.Text type="secondary">上传时间：{dayjs(item.createdAt).format('YYYY-MM-DD HH:mm')}</Typography.Text>
+                      <Typography.Text type="secondary">⏱️ {dayjs(item.createdAt).format('YYYY-MM-DD HH:mm')}</Typography.Text>
                     </div>
 
                     {!!parsed.fallbackReason && (
                       <Typography.Text type="warning">回退说明：{getFallbackReasonText(parsed.fallbackReason)}</Typography.Text>
                     )}
 
-                    {parsed.costUsd > 0 && (
-                      <Typography.Text type="secondary">本资料AI成本：${parsed.costUsd.toFixed(3)}</Typography.Text>
+                    {hasFallbackVideo && (
+                      <Typography.Text type="secondary">
+                        暂无法生成专业视频{parsed.fallbackReason ? `（${getFallbackReasonText(parsed.fallbackReason)}）` : ''}
+                      </Typography.Text>
                     )}
 
-                    {(parsed.audioUrl || parsed.videoUrl) && (
-                      <Space wrap size={8}>
-                        {parsed.audioUrl ? (
-                          <Typography.Link href={resolveAssetUrl(parsed.audioUrl)} target="_blank">
-                            打开专业音频
-                          </Typography.Link>
-                        ) : null}
-                        {parsed.videoUrl ? (
-                          <Typography.Link href={resolveAssetUrl(parsed.videoUrl)} target="_blank">
-                            打开专业视频
-                          </Typography.Link>
-                        ) : null}
-                      </Space>
+                    {audioReady && showAudioPlayer && (
+                      <div className="media-frame audio-frame">
+                        <audio
+                          controls
+                          autoPlay={expandedAudioMaterialId === item.id}
+                          src={resolvedAudioUrl}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                    )}
+
+                    {videoReady && showVideoPlayer && (
+                      <div className="media-frame video-frame">
+                        <video
+                          controls
+                          autoPlay={expandedVideoMaterialId === item.id}
+                          src={playableVideoUrl}
+                          style={{ width: '100%', borderRadius: 10, background: '#000' }}
+                        />
+                      </div>
                     )}
 
                     <Space wrap size={8} className="material-action-row">
                       {!!fileHref && (
-                        <>
-                          <Typography.Link href={fileHref} target="_blank" rel="noopener noreferrer">
-                            查看文件
-                          </Typography.Link>
-                          <Typography.Link href={fileHref} download>
-                            下载文件
-                          </Typography.Link>
-                        </>
+                        <Typography.Link href={fileHref} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13 }}>
+                          查看原文件
+                        </Typography.Link>
                       )}
                       <Button
                         size="small"
-                        type="primary"
+                        type={audioReady ? 'default' : 'primary'}
                         loading={isGeneratingAudio}
                         disabled={isAnyGenerating}
-                        onClick={() => onGenerateMaterialProduct(item.id, 'audio')}
+                        onClick={() => {
+                          if (audioReady) {
+                            setExpandedAudioMaterialId((prev) => (prev === item.id ? null : item.id));
+                            return;
+                          }
+                          if (hasFallbackAudio) {
+                            void onPlayMaterialAudio(item.id, parsed.recognitionText);
+                            return;
+                          }
+                          void onGenerateMaterialProduct(item.id, 'audio');
+                        }}
                       >
-                        生成音频
+                        {audioReady
+                          ? (showAudioPlayer ? '⏸ 收起' : '▶️ 播放音频')
+                          : (hasFallbackAudio ? '🔊 朗读文本' : '🎙️ 生成音频')}
                       </Button>
                       <Button
                         size="small"
+                        type={videoReady ? 'default' : 'primary'}
                         loading={isGeneratingVideo}
                         disabled={isAnyGenerating}
-                        onClick={() => onGenerateMaterialProduct(item.id, 'video')}
+                        onClick={() => {
+                          if (videoReady) {
+                            setExpandedVideoMaterialId((prev) => (prev === item.id ? null : item.id));
+                            return;
+                          }
+                          void onGenerateMaterialProduct(item.id, 'video');
+                        }}
                       >
-                        生成视频
+                        {videoReady
+                          ? (showVideoPlayer ? '⏸ 收起' : '▶️ 播放视频')
+                          : '🎬 生成视频'}
                       </Button>
                     </Space>
                   </Space>

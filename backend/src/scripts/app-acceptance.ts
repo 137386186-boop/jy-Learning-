@@ -98,10 +98,18 @@ async function main() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password, displayName }),
+  })) as { ok?: boolean; message?: string };
+
+  assert(register.ok === true, 'register failed');
+
+  const login = (await requestJson('/api/app/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
   })) as { token?: string; parent?: { id: string; username: string } };
 
-  assert(!!register.token, 'register did not return token');
-  const token = register.token as string;
+  assert(!!login.token, 'login did not return token');
+  const token = login.token as string;
 
   const authHeaders = {
     Authorization: `Bearer ${token}`,
@@ -215,7 +223,7 @@ async function main() {
       {
         ok: true,
         baseUrl: BASE_URL,
-        parentId: register.parent?.id,
+        parentId: login.parent?.id,
         childId: child.id,
         taskId: task.id,
         materialId: uploaded.id,

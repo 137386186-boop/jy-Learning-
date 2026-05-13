@@ -563,7 +563,7 @@ export default function AppChildToday() {
   const comboHint = getComboHint(todayCombo);
 
   return (
-    <div style={{ background: 'linear-gradient(180deg, #fff7e6 0%, #f0f5ff 100%)', borderRadius: 20, padding: 16 }}>
+    <div className="app-page-shell child-today-shell">
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Alert
           showIcon
@@ -583,7 +583,7 @@ export default function AppChildToday() {
           }
         />
 
-        <Card size="small" style={{ borderRadius: 14 }}>
+        <Card size="small" className="child-status-card">
           <Space style={{ justifyContent: 'space-between', width: '100%' }} wrap>
             <Typography.Text>庆祝音效</Typography.Text>
             <Switch checked={celebrateSoundEnabled} onChange={setCelebrateSoundEnabled} checkedChildren="开" unCheckedChildren="关" />
@@ -638,9 +638,9 @@ export default function AppChildToday() {
 
         {videoPreview && (
           <Card
+            className="app-child-card"
             title={`正在播放：${videoPreview.title || '学习视频'}`}
             extra={<Button size="small" onClick={() => replaceVideoPreview(null)}>关闭视频</Button>}
-            style={{ borderRadius: 16, borderColor: '#91d5ff' }}
             bodyStyle={{ background: '#f6ffed' }}
           >
             <video
@@ -659,12 +659,13 @@ export default function AppChildToday() {
         )}
 
         <Card
+          className="app-child-card child-status-card"
           title={data ? `${data.child.name} 的今日任务` : '今日任务'}
           loading={loading}
-          style={{ borderRadius: 16, borderColor: '#ffd591' }}
           bodyStyle={{ background: '#fffdf7' }}
         >
           <List
+            className="child-task-list"
             dataSource={data?.list || []}
             locale={{ emptyText: '今天暂无任务' }}
             renderItem={(item) => {
@@ -674,7 +675,7 @@ export default function AppChildToday() {
                 <List.Item>
                   <Space direction="vertical" size={10} style={{ width: '100%' }}>
                     <Space wrap>
-                      <Typography.Text strong style={{ fontSize: 22, lineHeight: 1.3 }}>{item.title}</Typography.Text>
+                      <Typography.Text strong className="child-task-title">{item.title}</Typography.Text>
                       <Tag color="blue" style={{ fontSize: 14, padding: '2px 8px' }}>{item.category}</Tag>
                       <Tag style={{ fontSize: 14, padding: '2px 8px' }}>{`难度 ${item.difficulty}`}</Tag>
                       <Tag color={statusMeta.color} style={{ fontSize: 14, padding: '2px 8px' }}>{statusMeta.label}</Tag>
@@ -708,7 +709,7 @@ export default function AppChildToday() {
                       <Button
                         key="audio"
                         size="large"
-                        style={{ minWidth: 130, height: 50, fontSize: 20, fontWeight: 600, borderRadius: 12 }}
+                        className="child-action-btn"
                         loading={speakingTaskId === item.id}
                         disabled={videoTaskId === item.id || completingTaskId === item.id}
                         onClick={() => onPlayAudio(item)}
@@ -720,7 +721,7 @@ export default function AppChildToday() {
                         type="primary"
                         ghost
                         size="large"
-                        style={{ minWidth: 130, height: 50, fontSize: 20, fontWeight: 600, borderRadius: 12 }}
+                        className="child-action-btn"
                         loading={videoTaskId === item.id}
                         disabled={speakingTaskId === item.id || completingTaskId === item.id}
                         onClick={() => onPlayVideo(item)}
@@ -731,7 +732,7 @@ export default function AppChildToday() {
                         key="done"
                         type="primary"
                         size="large"
-                        style={{ minWidth: 150, height: 50, fontSize: 20, fontWeight: 700, borderRadius: 12 }}
+                        className="child-action-btn primary"
                         loading={completingTaskId === item.id}
                         disabled={status === 'done' || speakingTaskId === item.id || videoTaskId === item.id}
                         onClick={() => postTaskAction(item.id, 'complete')}

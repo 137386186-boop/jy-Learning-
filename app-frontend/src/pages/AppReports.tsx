@@ -74,6 +74,17 @@ function getGrowthLevel(summary?: ReportResponse['summary'] | null) {
   return { level: '进步苗苗', medal: '成长勋章', color: '#52c41a' };
 }
 
+const GRADE_LEVEL_LABEL: Record<string, string> = {
+  pre_k: '学前',
+  kindergarten: '幼儿园',
+  primary_prep: '幼升小',
+};
+
+function getGradeLevelLabel(value?: string | null) {
+  if (!value) return '未设置';
+  return GRADE_LEVEL_LABEL[value] || value;
+}
+
 function getRankStyle(index: number) {
   if (index === 0) return { badge: 'TOP1', color: '#faad14', bg: '#fff7e6' };
   if (index === 1) return { badge: 'TOP2', color: '#8c8c8c', bg: '#fafafa' };
@@ -148,6 +159,7 @@ export default function AppReports() {
           <Statistic title="进行中" value={report?.summary.inProgress || 0} />
           <Statistic title="音频学习次数" value={report?.summary.audioPlayCount || 0} />
           <Statistic title="视频学习次数" value={report?.summary.videoPlayCount || 0} />
+          <Statistic title="年级阶段" value={getGradeLevelLabel(report?.child.gradeLevel)} />
           <Statistic
             title="平均得分"
             value={report?.summary.averageScore === null || report?.summary.averageScore === undefined
