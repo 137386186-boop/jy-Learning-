@@ -267,6 +267,7 @@ export default function AppLearning() {
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrStage, setOcrStage] = useState<string>('');
   const [ocrPercent, setOcrPercent] = useState(0);
+  const [ocrPreview, setOcrPreview] = useState<{ file: File; text: string; thumbUrl: string; title: string } | null>(null);
 
   // —— 日历看板 & 安排日期相关 ——
   const todayStr = dayjs().format('YYYY-MM-DD');
@@ -805,10 +806,17 @@ export default function AppLearning() {
     }
   };
 
-  // 拍照/相册选完图片后：客户端 OCR → 自动切到"粘贴文本" tab + 预填识别文字
+  // 拍照/相册选完图片后：客户端 OCR → 在当前 tab 内展示识别卡片（不切 tab）
   const onPickImageForOcr = async (file: File) => {
-    setUploadFile(file); // 保留原图作为可上传的兜底
-    if (!isLikelyImage(file)) return; // 非图片不走 OCR
+    if (!isLikelyImage(file)) {
+      setUploadFile(file); // 非图片走原上传流程
+      return;
+    }
+    // 撤销旧的预览 URL
+    if (ocrPreview?.thumbUrl) {
+      try { URL.revokeObjectURL(ocrPreview.thumbUrl); } catch { /* ignore */ }
+    }
+    setOcrPreview(null);
     setOcrBusy(true);
     setOcrPercent(2);
     setOcrStage('📦 正在准备识别模型…');
@@ -820,18 +828,16 @@ export default function AppLearning() {
         else setOcrStage('✅ 识别完成');
       });
       const cleaned = (text || '').replace(/\s+/g, ' ').trim();
-      if (!cleaned) {
-        message.warning('没有识别到可朗读的文字。你可以切到「📝 粘贴文本」自己输入');
-        return;
-      }
-      // 取文件名作为默认标题
       const baseTitle = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || '拍照学习';
-      setDirectMediaTitle(baseTitle);
-      setDirectMediaText(text);
-      setCreateMode('paste');
-      message.success(`✅ 已识别 ${cleaned.length} 个字，可在「粘贴文本」中编辑后一键生成`);
+      const thumbUrl = URL.createObjectURL(file);
+      setOcrPreview({ file, text: cleaned || '', thumbUrl, title: baseTitle });
+      if (!cleaned) {
+        message.warning('没有识别到清晰的文字，你可以手动在文本框里输入');
+      } else {
+        message.success(`✅ 识别到 ${cleaned.length} 个字，可编辑后生成音频或视频`);
+      }
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '识别失败，请稍后重试或手动输入');
+      message.error(e instanceof Error ? e.message : '识别失败，请稍后重试');
     } finally {
       setOcrBusy(false);
       window.setTimeout(() => {
@@ -839,6 +845,29 @@ export default function AppLearning() {
         setOcrStage('');
       }, 1500);
     }
+  };
+
+  const onClearOcrPreview = () => {
+    if (ocrPreview?.thumbUrl) {
+      try { URL.revokeObjectURL(ocrPreview.thumbUrl); } catch { /* ignore */ }
+    }
+    setOcrPreview(null);
+    document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
+  };
+
+  // 把当前 OCR 文本保存到作品库（伪装成粘贴文本流程）
+  const onSaveOcrToLibrary = async () => {
+    if (!ocrPreview) return;
+    const txt = ocrPreview.text.trim();
+    if (!txt) {
+      message.warning('请先输入或识别文字内容');
+      return;
+    }
+    const safeTitle = (ocrPreview.title || '拍照学习').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || 'photo';
+    const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+    const txtFile = new File([blob], `${safeTitle}.txt`, { type: 'text/plain' });
+    await onUploadMaterial(true, txtFile);
+    onClearOcrPreview();
   };
 
   const onUpdateMaterial = async (
@@ -1594,6 +1623,12 @@ export default function AppLearning() {
                   label: '📱 手机号登录',
                   children: (
                     <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      <Alert
+                        type="warning"
+                        showIcon
+                        message="演示模式"
+                        description="当前未接入真实短信服务，点「获取验证码」会直接把验证码显示在屏幕上并自动填入。生产环境会通过短信下发。"
+                      />
                       <Input
                         size="large"
                         placeholder="请输入 11 位手机号"
@@ -2199,6 +2234,78 @@ export default function AppLearning() {
                         <div className="upload-stage-text">{ocrStage || '正在识别…'}</div>
                       </div>
                     )}
+
+                    {ocrPreview && (() => {
+                      const isAudioBusy = materialBusyId === 'ocr-preview' && materialAction === 'audio';
+                      const isVideoBusy = materialBusyId === 'ocr-preview' && materialAction === 'video';
+                      const hasText = !!ocrPreview.text.trim();
+                      return (
+                        <div className="ocr-preview-card">
+                          <div className="ocr-preview-head">
+                            <img src={ocrPreview.thumbUrl} alt="拍摄预览" className="ocr-preview-thumb" />
+                            <div className="ocr-preview-meta">
+                              <Input
+                                size="small"
+                                value={ocrPreview.title}
+                                onChange={(e) => setOcrPreview({ ...ocrPreview, title: e.target.value })}
+                                maxLength={40}
+                                placeholder="作品名称"
+                              />
+                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                ✅ 识别到 {ocrPreview.text.length} 字 · 可编辑后用于生成音/视频
+                              </Typography.Text>
+                            </div>
+                            <Button size="small" type="text" onClick={onClearOcrPreview}>✕</Button>
+                          </div>
+                          <Input.TextArea
+                            value={ocrPreview.text}
+                            onChange={(e) => setOcrPreview({ ...ocrPreview, text: e.target.value })}
+                            autoSize={{ minRows: 3, maxRows: 8 }}
+                            maxLength={2400}
+                            showCount
+                            placeholder="OCR 识别结果（可编辑）"
+                          />
+                          <Space wrap size={8} style={{ marginTop: 8 }}>
+                            <Button
+                              type="primary"
+                              icon={<span>🎙️</span>}
+                              disabled={!hasText || isAudioBusy}
+                              loading={isAudioBusy}
+                              onClick={() => {
+                                setMaterialBusyId('ocr-preview');
+                                setMaterialAction('audio');
+                                void Promise.resolve(onPlayMaterialAudio('ocr-preview', ocrPreview.text)).finally(() => {
+                                  setMaterialBusyId(null);
+                                  setMaterialAction(null);
+                                });
+                              }}
+                            >生成并朗读音频</Button>
+                            <Button
+                              icon={<span>🎬</span>}
+                              disabled={!hasText || isVideoBusy}
+                              loading={isVideoBusy}
+                              onClick={async () => {
+                                setMaterialBusyId('ocr-preview');
+                                setMaterialAction('video');
+                                try {
+                                  await onGenerateMaterialVideo('ocr-preview', ocrPreview.title || '拍照学习', ocrPreview.text, 'landscape');
+                                } finally {
+                                  setMaterialBusyId(null);
+                                  setMaterialAction(null);
+                                }
+                              }}
+                            >生成视频</Button>
+                            <Button
+                              icon={<span>💾</span>}
+                              loading={uploading}
+                              disabled={!hasText || uploading}
+                              onClick={onSaveOcrToLibrary}
+                            >保存到作品库</Button>
+                          </Space>
+                        </div>
+                      );
+                    })()}
+
                     <Space wrap align="center" size={10} className="upload-row">
                       {uploadFile && (
                         <Tag color="blue" closable onClose={(e) => {
@@ -2229,10 +2336,17 @@ export default function AppLearning() {
                         style={{ width: 160 }}
                         prefix={<span>📅</span>}
                       />
-                      <Button onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading || !uploadFile}>仅上传</Button>
-                      <Button type="primary" size="large" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
-                        ✨ 一键生成音视频
-                      </Button>
+                      {uploadFile && (
+                        <>
+                          <Button onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading || !uploadFile}>仅上传</Button>
+                          <Button type="primary" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
+                            🎙️ 上传并生成音频
+                          </Button>
+                          <Button type="primary" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
+                            🎬 上传并生成视频
+                          </Button>
+                        </>
+                      )}
                     </Space>
                   </Space>
                 ),
@@ -2277,28 +2391,61 @@ export default function AppLearning() {
                         style={{ width: 160 }}
                         prefix={<span>📅</span>}
                       />
-                      <Button
-                        type="primary"
-                        size="large"
-                        className="hero-cta"
-                        loading={uploading}
-                        disabled={uploading || !directMediaText.trim()}
-                        onClick={() => {
-                          const text = directMediaText.trim();
-                          if (!text) return;
-                          const titleRaw = directMediaTitle.trim() || '粘贴文本';
-                          const safeTitle = titleRaw.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || 'paste';
-                          const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-                          const file = new File([blob], `${safeTitle}.txt`, { type: 'text/plain' });
-                          void onUploadMaterial(true, file).then(() => {
-                            setDirectMediaText('');
-                            setDirectMediaTitle('家庭学习音视频');
-                          });
-                        }}
-                      >
-                        ✨ 一键生成音视频
-                      </Button>
                     </Space>
+                    {(() => {
+                      const text = directMediaText.trim();
+                      const hasText = !!text;
+                      const isAudioBusy = materialBusyId === 'paste-preview' && materialAction === 'audio';
+                      const isVideoBusy = materialBusyId === 'paste-preview' && materialAction === 'video';
+                      return (
+                        <Space wrap size={8}>
+                          <Button
+                            type="primary"
+                            icon={<span>🎙️</span>}
+                            disabled={!hasText || isAudioBusy}
+                            loading={isAudioBusy}
+                            onClick={() => {
+                              setMaterialBusyId('paste-preview');
+                              setMaterialAction('audio');
+                              void Promise.resolve(onPlayMaterialAudio('paste-preview', text)).finally(() => {
+                                setMaterialBusyId(null);
+                                setMaterialAction(null);
+                              });
+                            }}
+                          >生成并朗读音频</Button>
+                          <Button
+                            icon={<span>🎬</span>}
+                            disabled={!hasText || isVideoBusy}
+                            loading={isVideoBusy}
+                            onClick={async () => {
+                              setMaterialBusyId('paste-preview');
+                              setMaterialAction('video');
+                              try {
+                                await onGenerateMaterialVideo('paste-preview', directMediaTitle.trim() || '粘贴文本', text, 'landscape');
+                              } finally {
+                                setMaterialBusyId(null);
+                                setMaterialAction(null);
+                              }
+                            }}
+                          >生成视频</Button>
+                          <Button
+                            icon={<span>💾</span>}
+                            loading={uploading}
+                            disabled={!hasText || uploading}
+                            onClick={() => {
+                              const titleRaw = directMediaTitle.trim() || '粘贴文本';
+                              const safeTitle = titleRaw.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || 'paste';
+                              const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+                              const file = new File([blob], `${safeTitle}.txt`, { type: 'text/plain' });
+                              void onUploadMaterial(true, file).then(() => {
+                                setDirectMediaText('');
+                                setDirectMediaTitle('家庭学习音视频');
+                              });
+                            }}
+                          >保存到作品库</Button>
+                        </Space>
+                      );
+                    })()}
                   </Space>
                 ),
               },
@@ -2343,7 +2490,6 @@ export default function AppLearning() {
               const playableVideoUrl = resolvedVideoUrl || localVideoUrl;
               const isGeneratingAudio = materialBusyId === item.id && materialAction === 'audio';
               const isGeneratingVideo = materialBusyId === item.id && materialAction === 'video';
-              const isAnyGenerating = materialBusyId === item.id;
               const hasFallbackAudio = parsed.mediaStatus === 'fallback' && !resolvedAudioUrl && !!parsed.recognitionText;
               const hasFallbackVideo = parsed.mediaStatus === 'fallback' && !playableVideoUrl;
               const audioReady = !!resolvedAudioUrl;
@@ -2502,7 +2648,7 @@ export default function AppLearning() {
                         size="small"
                         type={audioReady ? 'default' : 'primary'}
                         loading={isGeneratingAudio}
-                        disabled={isAnyGenerating}
+                        disabled={isGeneratingAudio}
                         onClick={() => {
                           if (audioReady) {
                             setExpandedAudioMaterialId((prev) => (prev === item.id ? null : item.id));
@@ -2523,7 +2669,7 @@ export default function AppLearning() {
                         size="small"
                         type={videoReady ? 'default' : 'primary'}
                         loading={isGeneratingVideo}
-                        disabled={isAnyGenerating}
+                        disabled={isGeneratingVideo}
                         onClick={() => {
                           if (videoReady) {
                             setExpandedVideoMaterialId((prev) => (prev === item.id ? null : item.id));
