@@ -7,9 +7,26 @@ import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { ArtifactType, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
+import redis from '../lib/redis';
 import { requireAppParent, signAppParentToken, type AppParentTokenPayload } from '../lib/app-auth';
 import { recognizeMaterial } from '../lib/ai-recognition';
 import { generateProfessionalMedia, type MediaKind } from '../lib/media-generation';
+
+// —— 短信验证码登录配置 ——
+const SMS_CODE_TTL_SEC = 5 * 60;
+const SMS_RESEND_COOLDOWN_SEC = 60;
+const SMS_PROVIDER = String(process.env.APP_SMS_PROVIDER || '').trim().toLowerCase();
+const SMS_DEMO_MODE = SMS_PROVIDER === '' || SMS_PROVIDER === 'demo';
+
+function generateSmsCode(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function sendSmsViaProvider(_phone: string, _code: string): Promise<{ ok: boolean; reason?: string }> {
+  // 留给后续接入：阿里云/腾讯云/Twilio 等。当前只支持 demo 模式。
+  if (SMS_DEMO_MODE) return { ok: true };
+  return { ok: false, reason: 'sms_provider_not_implemented' };
+}
 
 const router = Router();
 
@@ -211,6 +228,116 @@ router.post('/auth/login', loginLimiter, async (req: Request, res: Response) => 
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
   }
+});
+
+// —— 手机号 + 验证码：发送验证码 ——
+router.post('/auth/sms/request', authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { phone } = req.body as { phone?: string };
+    const p = (phone || '').trim();
+    if (!isValidPhone(p)) {
+      badRequest(res, PHONE_POLICY_MESSAGE, { phone: PHONE_POLICY_MESSAGE });
+      return;
+    }
+    const cooldownKey = `app:sms:cooldown:${p}`;
+    const onCooldown = await redis.get(cooldownKey);
+    if (onCooldown) {
+      const ttl = await redis.ttl(cooldownKey);
+      res.status(429).json({ error: `请 ${ttl > 0 ? ttl : SMS_RESEND_COOLDOWN_SEC} 秒后再获取验证码` });
+      return;
+    }
+    const code = generateSmsCode();
+    await redis.set(`app:sms:code:${p}`, code, 'EX', SMS_CODE_TTL_SEC);
+    await redis.set(cooldownKey, '1', 'EX', SMS_RESEND_COOLDOWN_SEC);
+
+    const send = await sendSmsViaProvider(p, code);
+    if (!send.ok && !SMS_DEMO_MODE) {
+      res.status(500).json({ error: '短信发送失败，请稍后再试' });
+      return;
+    }
+    const body: Record<string, unknown> = {
+      ok: true,
+      cooldownSeconds: SMS_RESEND_COOLDOWN_SEC,
+      ttlSeconds: SMS_CODE_TTL_SEC,
+    };
+    if (SMS_DEMO_MODE) {
+      body.demoMode = true;
+      body.demoCode = code;
+      body.message = '当前为演示模式：验证码直接显示（生产环境会通过短信发送）';
+    }
+    res.json(body);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+// —— 手机号 + 验证码：登录 / 自动注册 ——
+router.post('/auth/sms/login', loginLimiter, async (req: Request, res: Response) => {
+  try {
+    const { phone, code } = req.body as { phone?: string; code?: string };
+    const p = (phone || '').trim();
+    const c = (code || '').trim();
+    if (!isValidPhone(p)) {
+      badRequest(res, PHONE_POLICY_MESSAGE, { phone: PHONE_POLICY_MESSAGE });
+      return;
+    }
+    if (!/^\d{6}$/.test(c)) {
+      badRequest(res, '请输入 6 位验证码', { code: '请输入 6 位验证码' });
+      return;
+    }
+    const key = `app:sms:code:${p}`;
+    const expected = await redis.get(key);
+    if (!expected || expected !== c) {
+      res.status(401).json({ error: '验证码错误或已过期' });
+      return;
+    }
+    await redis.del(key);
+
+    let parent = await prisma.appParent.findUnique({ where: { username: p } });
+    let isNew = false;
+    if (!parent) {
+      const randomPwd = crypto.randomBytes(16).toString('hex');
+      const passwordHash = await bcrypt.hash(randomPwd, 10);
+      parent = await prisma.appParent.create({
+        data: {
+          username: p,
+          passwordHash,
+          displayName: `家长${p.slice(-4)}`,
+        },
+      });
+      isNew = true;
+    }
+    const token = signAppParentToken({ id: parent.id, username: parent.username });
+    res.json({
+      token,
+      isNew,
+      parent: { id: parent.id, username: parent.username, displayName: parent.displayName },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error';
+    res.status(500).json({ error: msg });
+  }
+});
+
+// —— 微信小程序登录预留 ——
+router.post('/auth/wechat-mini/login', authLimiter, async (req: Request, res: Response) => {
+  const { code } = req.body as { code?: string };
+  if (!code) {
+    res.status(400).json({ error: '缺少 wx.login() 返回的 code' });
+    return;
+  }
+  const appId = process.env.WECHAT_MINI_APPID;
+  const secret = process.env.WECHAT_MINI_SECRET;
+  if (!appId || !secret) {
+    res.status(501).json({
+      error: 'wechat_mini_not_configured',
+      message: '微信小程序登录尚未配置（请在后端设置 WECHAT_MINI_APPID / WECHAT_MINI_SECRET）',
+    });
+    return;
+  }
+  // 实际实现位置：调 https://api.weixin.qq.com/sns/jscode2session 换 openid → 自动注册/登录
+  res.status(501).json({ error: 'wechat_mini_login_pending', message: '小程序登录路径已预留，待小程序壳工程接入后实现' });
 });
 
 router.post('/auth/forgot-password', authLimiter, async (req: Request, res: Response) => {

@@ -234,8 +234,13 @@ export default function AppLearning() {
   const [children, setChildren] = useState<Child[]>([]);
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [authMode, setAuthMode] = useState<'register' | 'login'>('login');
+  const [authMode, setAuthMode] = useState<'sms' | 'login' | 'register'>('sms');
   const [loginAssistMode, setLoginAssistMode] = useState<'none' | 'forgot' | 'reset'>('none');
+  const [smsPhone, setSmsPhone] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [smsCooldown, setSmsCooldown] = useState(0);
+  const [smsSending, setSmsSending] = useState(false);
+  const [smsLoggingIn, setSmsLoggingIn] = useState(false);
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [forgotSubmitting, setForgotSubmitting] = useState(false);
   const [resetSubmitting, setResetSubmitting] = useState(false);
@@ -416,6 +421,88 @@ export default function AppLearning() {
       message.error('网络异常，请稍后重试');
     } finally {
       setAuthSubmitting(false);
+    }
+  };
+
+  // —— 倒计时 ——
+  useEffect(() => {
+    if (smsCooldown <= 0) return;
+    const t = window.setInterval(() => setSmsCooldown((s) => (s > 0 ? s - 1 : 0)), 1000);
+    return () => window.clearInterval(t);
+  }, [smsCooldown]);
+
+  const onRequestSmsCode = async () => {
+    const phone = smsPhone.trim();
+    if (!/^1\d{10}$/.test(phone)) {
+      message.warning('请输入 11 位手机号');
+      return;
+    }
+    setSmsSending(true);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/auth/sms/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone }),
+      });
+      const data = await parseApiResponse(res);
+      if (!res.ok) {
+        message.error(getApiErrorMessage(data, '获取验证码失败', res.status));
+        return;
+      }
+      const obj = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+      const cd = typeof obj.cooldownSeconds === 'number' ? obj.cooldownSeconds : 60;
+      setSmsCooldown(cd);
+      if (obj.demoMode && typeof obj.demoCode === 'string') {
+        setSmsCode(obj.demoCode);
+        message.success(`📩 演示验证码：${obj.demoCode}（已自动填入）`);
+      } else {
+        message.success('验证码已发送，请查收短信');
+      }
+    } catch {
+      message.error('网络异常，请稍后重试');
+    } finally {
+      setSmsSending(false);
+    }
+  };
+
+  const onSmsLogin = async () => {
+    const phone = smsPhone.trim();
+    const code = smsCode.trim();
+    if (!/^1\d{10}$/.test(phone)) {
+      message.warning('请输入 11 位手机号');
+      return;
+    }
+    if (!/^\d{6}$/.test(code)) {
+      message.warning('请输入 6 位验证码');
+      return;
+    }
+    setSmsLoggingIn(true);
+    try {
+      const res = await appFetch(`${APP_API_BASE}/auth/sms/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, code }),
+      });
+      const data = await parseApiResponse(res);
+      if (!res.ok) {
+        message.error(getApiErrorMessage(data, '登录失败', res.status));
+        return;
+      }
+      const obj = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+      const tokenValue = typeof obj.token === 'string' ? obj.token : '';
+      if (!tokenValue) {
+        message.error('登录失败');
+        return;
+      }
+      setAppToken(tokenValue);
+      setToken(tokenValue);
+      setSmsPhone('');
+      setSmsCode('');
+      message.success(obj.isNew ? '欢迎加入！已为您自动创建账号' : '登录成功');
+    } catch {
+      message.error('网络异常，请稍后重试');
+    } finally {
+      setSmsLoggingIn(false);
     }
   };
 
@@ -1492,19 +1579,69 @@ export default function AppLearning() {
               type="info"
               showIcon
               message="幼升小启蒙 APP"
-              description="先注册或登录家长账号，再为孩子创建学习任务。首次访问服务启动可能需要 10-30 秒。"
+              description="输入手机号即可登录，未注册会自动创建账号。首次访问服务启动可能需要 10-30 秒。"
             />
 
             <Tabs
               activeKey={authMode}
               onChange={(key) => {
-                setAuthMode(key as 'register' | 'login');
+                setAuthMode(key as 'sms' | 'register' | 'login');
                 setLoginAssistMode('none');
               }}
               items={[
                 {
+                  key: 'sms',
+                  label: '📱 手机号登录',
+                  children: (
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      <Input
+                        size="large"
+                        placeholder="请输入 11 位手机号"
+                        value={smsPhone}
+                        onChange={(e) => setSmsPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                        maxLength={11}
+                        autoComplete="tel"
+                        prefix={<span style={{ fontSize: 18 }}>📱</span>}
+                      />
+                      <Space.Compact style={{ width: '100%' }}>
+                        <Input
+                          size="large"
+                          placeholder="6 位验证码"
+                          value={smsCode}
+                          onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          maxLength={6}
+                          autoComplete="one-time-code"
+                          prefix={<span style={{ fontSize: 18 }}>🔑</span>}
+                        />
+                        <Button
+                          size="large"
+                          onClick={onRequestSmsCode}
+                          disabled={smsCooldown > 0 || smsSending || !/^1\d{10}$/.test(smsPhone)}
+                          loading={smsSending}
+                          style={{ minWidth: 116 }}
+                        >
+                          {smsCooldown > 0 ? `${smsCooldown}s 后重发` : '获取验证码'}
+                        </Button>
+                      </Space.Compact>
+                      <Button
+                        type="primary"
+                        size="large"
+                        block
+                        onClick={onSmsLogin}
+                        loading={smsLoggingIn}
+                        disabled={!/^1\d{10}$/.test(smsPhone) || !/^\d{6}$/.test(smsCode)}
+                      >
+                        登录 / 注册
+                      </Button>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        未注册手机号将自动创建账号，无需密码。
+                      </Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
                   key: 'login',
-                  label: '登录',
+                  label: '账号密码',
                   children: (
                     <Space direction="vertical" size={10} style={{ width: '100%' }}>
                       <Form form={loginForm} layout="vertical" onFinish={onLogin} autoComplete="on">
