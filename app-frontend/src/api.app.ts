@@ -19,7 +19,10 @@ export async function appFetch(path: string, init: RequestInit = {}): Promise<Re
   const headers = new Headers(init.headers || {});
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(path, { ...init, headers });
-  if (response.status === 401) clearAppToken();
+  if (response.status === 401) {
+    clearAppToken();
+    window.dispatchEvent(new CustomEvent('app:unauthorized'));
+  }
   return response;
 }
 
@@ -29,13 +32,18 @@ export interface AppUploadResult {
   data: unknown;
 }
 
+export interface AppUploadHandle {
+  promise: Promise<AppUploadResult>;
+  abort: () => void;
+}
+
 export function appUpload(
   url: string,
   formData: FormData,
   onProgress?: (percent: number) => void
-): Promise<AppUploadResult> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
+): AppUploadHandle {
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise<AppUploadResult>((resolve, reject) => {
     xhr.open('POST', url, true);
     const token = getAppToken();
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
@@ -48,7 +56,10 @@ export function appUpload(
     };
 
     xhr.onload = () => {
-      if (xhr.status === 401) clearAppToken();
+      if (xhr.status === 401) {
+        clearAppToken();
+        window.dispatchEvent(new CustomEvent('app:unauthorized'));
+      }
       let parsed: unknown = {};
       try {
         parsed = xhr.responseText ? JSON.parse(xhr.responseText) : {};
@@ -63,6 +74,7 @@ export function appUpload(
 
     xhr.send(formData);
   });
+  return { promise, abort: () => xhr.abort() };
 }
 
 export { APP_API_BASE };

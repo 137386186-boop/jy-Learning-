@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Alert, Button, Card, Checkbox, Form, Input, List, Progress, Select, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
 import type { FormInstance } from 'antd';
@@ -239,6 +239,7 @@ export default function AppLearning() {
   const [smsPhone, setSmsPhone] = useState('');
   const [smsCode, setSmsCode] = useState('');
   const [smsCooldown, setSmsCooldown] = useState(0);
+  const [smsCooldownEndMs, setSmsCooldownEndMs] = useState<number | null>(null);
   const [smsSending, setSmsSending] = useState(false);
   const [smsLoggingIn, setSmsLoggingIn] = useState(false);
   const [authSubmitting, setAuthSubmitting] = useState(false);
@@ -257,6 +258,7 @@ export default function AppLearning() {
   const [uploadChildId, setUploadChildId] = useState<string | undefined>(undefined);
   const [uploadPercent, setUploadPercent] = useState(0);
   const [uploadStage, setUploadStage] = useState<string>('');
+  const uploadAbortRef = useRef<(() => void) | null>(null);
   const [directMediaTitle, setDirectMediaTitle] = useState('家庭学习音视频');
   const [directMediaText, setDirectMediaText] = useState('');
   const [selectedMaterialIds, setSelectedMaterialIds] = useState<string[]>([]);
@@ -425,12 +427,18 @@ export default function AppLearning() {
     }
   };
 
-  // —— 倒计时 ——
+  // —— 倒计时（基于结束时间戳，防止页面/标签切换造成漂移）——
   useEffect(() => {
-    if (smsCooldown <= 0) return;
-    const t = window.setInterval(() => setSmsCooldown((s) => (s > 0 ? s - 1 : 0)), 1000);
+    if (!smsCooldownEndMs) return;
+    const tick = () => {
+      const remain = Math.max(0, Math.ceil((smsCooldownEndMs - Date.now()) / 1000));
+      setSmsCooldown(remain);
+      if (remain <= 0) setSmsCooldownEndMs(null);
+    };
+    tick();
+    const t = window.setInterval(tick, 500);
     return () => window.clearInterval(t);
-  }, [smsCooldown]);
+  }, [smsCooldownEndMs]);
 
   const onRequestSmsCode = async () => {
     const phone = smsPhone.trim();
@@ -452,6 +460,7 @@ export default function AppLearning() {
       }
       const obj = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
       const cd = typeof obj.cooldownSeconds === 'number' ? obj.cooldownSeconds : 60;
+      setSmsCooldownEndMs(Date.now() + cd * 1000);
       setSmsCooldown(cd);
       if (obj.demoMode && typeof obj.demoCode === 'string') {
         setSmsCode(obj.demoCode);
@@ -728,7 +737,7 @@ export default function AppLearning() {
         formData.append('scheduledDate', uploadScheduledDate);
       }
 
-      const uploadRes = await appUpload(
+      const uploadHandle = appUpload(
         `${APP_API_BASE}/library/materials`,
         formData,
         (percent) => {
@@ -738,6 +747,8 @@ export default function AppLearning() {
           else setUploadStage('🧠 即将进入 AI 大脑…');
         }
       );
+      uploadAbortRef.current = uploadHandle.abort;
+      const uploadRes = await uploadHandle.promise;
 
       if (!uploadRes.ok) {
         setUploadStage('');
@@ -795,9 +806,14 @@ export default function AppLearning() {
       document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
       await reloadAll();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '上传失败，请稍后重试');
-      await reloadAll();
+      if (e instanceof Error && e.message === 'aborted') {
+        message.info('已取消上传');
+      } else {
+        message.error(e instanceof Error ? e.message : '上传失败，请稍后重试');
+        await reloadAll();
+      }
     } finally {
+      uploadAbortRef.current = null;
       setUploading(false);
       window.setTimeout(() => {
         setUploadPercent(0);
@@ -1624,10 +1640,11 @@ export default function AppLearning() {
                   children: (
                     <Space direction="vertical" size={12} style={{ width: '100%' }}>
                       <Alert
-                        type="warning"
+                        type="error"
                         showIcon
-                        message="演示模式"
-                        description="当前未接入真实短信服务，点「获取验证码」会直接把验证码显示在屏幕上并自动填入。生产环境会通过短信下发。"
+                        banner
+                        message="⚠️ 测试 / 演示模式"
+                        description="当前未接入真实短信服务，点「获取验证码」会把验证码直接显示在屏幕上并自动填入。生产环境会通过短信真实下发。"
                       />
                       <Input
                         size="large"
@@ -2459,7 +2476,14 @@ export default function AppLearning() {
                 status={uploadPercent >= 100 ? 'success' : 'active'}
                 strokeColor={{ from: '#1677ff', to: '#9254de' }}
               />
-              <div className="upload-stage-text">{uploadStage || '处理中…'}</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 4 }}>
+                <div className="upload-stage-text" style={{ marginTop: 0 }}>{uploadStage || '处理中…'}</div>
+                {uploading && uploadPercent < 100 && uploadAbortRef.current ? (
+                  <Button size="small" danger onClick={() => uploadAbortRef.current?.()}>
+                    取消上传
+                  </Button>
+                ) : null}
+              </div>
             </div>
           )}
 

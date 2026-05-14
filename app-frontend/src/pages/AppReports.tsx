@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Alert, Card, List, Progress, Space, Statistic, Typography, message } from 'antd';
+import { Alert, Button, Card, List, Progress, Space, Statistic, Typography, message } from 'antd';
 import dayjs from 'dayjs';
 import { APP_API_BASE, appFetch } from '../api.app';
 
@@ -99,35 +99,39 @@ export default function AppReports() {
   const [errorTip, setErrorTip] = useState('');
   const growth = getGrowthLevel(report?.summary);
 
-  useEffect(() => {
-    const fetchReport = async () => {
-      if (!childId) return;
-      setLoading(true);
-      setErrorTip('');
-      try {
-        const res = await appFetch(`${APP_API_BASE}/reports/${childId}`);
-        const data = await res.json();
-        if (!res.ok) {
-          const rawError = typeof data?.error === 'string' ? data.error : '';
-          const msg = rawError || '报告加载失败';
-          if (res.status === 403 || res.status === 404) {
-            setErrorTip('孩子不存在或无权限查看该报告');
-            message.error('孩子不存在或无权限查看该报告');
-          } else {
-            setErrorTip(msg);
-            message.error(msg);
-          }
-          setReport(null);
-          return;
+  const fetchReport = useCallback(async () => {
+    if (!childId) return;
+    setLoading(true);
+    setErrorTip('');
+    try {
+      const res = await appFetch(`${APP_API_BASE}/reports/${childId}`);
+      const data = await res.json();
+      if (!res.ok) {
+        const rawError = typeof data?.error === 'string' ? data.error : '';
+        const msg = rawError || '报告加载失败';
+        if (res.status === 403 || res.status === 404) {
+          setErrorTip('孩子不存在或无权限查看该报告');
+          message.error('孩子不存在或无权限查看该报告');
+        } else {
+          setErrorTip(msg);
+          message.error(msg);
         }
-        setReport(data);
-      } finally {
-        setLoading(false);
+        setReport(null);
+        return;
       }
-    };
-
-    fetchReport();
+      setReport(data);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '网络异常，请重试';
+      setErrorTip(msg);
+      setReport(null);
+    } finally {
+      setLoading(false);
+    }
   }, [childId]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -143,7 +147,14 @@ export default function AppReports() {
           showIcon
           type="warning"
           message={errorTip}
-          action={<Link to="/">返回家长端</Link>}
+          action={
+            <Space size={8}>
+              <Button size="small" type="primary" onClick={fetchReport} loading={loading}>
+                重试
+              </Button>
+              <Link to="/">返回家长端</Link>
+            </Space>
+          }
         />
       ) : null}
 
@@ -188,7 +199,14 @@ export default function AppReports() {
       <Card title="本周学习榜单" loading={loading}>
         <List
           dataSource={report?.weeklyRanking || []}
-          locale={{ emptyText: '本周暂无学习数据' }}
+          locale={{
+            emptyText: (
+              <Space direction="vertical" size={6} style={{ padding: 12 }}>
+                <Typography.Text type="secondary">本周还没有学习数据</Typography.Text>
+                <Link to="/">去上传资料 / 安排任务</Link>
+              </Space>
+            ),
+          }}
           renderItem={(item, index) => {
             const style = getRankStyle(index);
             const maxPoints = Math.max(1, report?.weeklyRanking?.[0]?.points || 1);
@@ -216,7 +234,14 @@ export default function AppReports() {
       <Card title="近7天学习趋势" loading={loading}>
         <List
           dataSource={report?.trend7d || []}
-          locale={{ emptyText: '暂无趋势数据' }}
+          locale={{
+            emptyText: (
+              <Space direction="vertical" size={6} style={{ padding: 12 }}>
+                <Typography.Text type="secondary">最近 7 天还没有学习记录</Typography.Text>
+                <Link to="/">去上传资料 / 安排任务</Link>
+              </Space>
+            ),
+          }}
           renderItem={(item) => {
             const peak = Math.max(1, ...(report?.trend7d || []).map((x) => x.doneCount * 3 + x.learnCount));
             const score = item.doneCount * 3 + item.learnCount;
@@ -241,7 +266,14 @@ export default function AppReports() {
       <Card title="分类完成情况" loading={loading}>
         <List
           dataSource={report?.categoryStats || []}
-          locale={{ emptyText: '暂无分类数据' }}
+          locale={{
+            emptyText: (
+              <Space direction="vertical" size={6} style={{ padding: 12 }}>
+                <Typography.Text type="secondary">暂无分类数据</Typography.Text>
+                <Link to="/">去安排不同分类的任务</Link>
+              </Space>
+            ),
+          }}
           renderItem={(item) => (
             <List.Item>
               <Space direction="vertical" style={{ width: '100%' }} size={4}>
@@ -259,7 +291,14 @@ export default function AppReports() {
       <Card title="最近任务进展" loading={loading}>
         <List
           dataSource={report?.recent || []}
-          locale={{ emptyText: '暂无任务进展' }}
+          locale={{
+            emptyText: (
+              <Space direction="vertical" size={6} style={{ padding: 12 }}>
+                <Typography.Text type="secondary">暂无任务进展</Typography.Text>
+                <Link to="/">去家长端给孩子安排任务</Link>
+              </Space>
+            ),
+          }}
           renderItem={(item) => (
             <List.Item>
               <Space direction="vertical" size={0}>
