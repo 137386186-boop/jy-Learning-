@@ -103,6 +103,18 @@ function createResetToken() {
   };
 }
 
+function fixUploadFilename(name: string): string {
+  if (!name) return name;
+  try {
+    const latinBuf = Buffer.from(name, 'latin1');
+    const decoded = latinBuf.toString('utf8');
+    if (Buffer.from(decoded, 'utf8').equals(latinBuf)) {
+      return decoded;
+    }
+  } catch {}
+  return name;
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
@@ -110,6 +122,7 @@ const upload = multer({
       cb(null, APP_UPLOAD_DIR);
     },
     filename: (_req, file, cb) => {
+      file.originalname = fixUploadFilename(file.originalname || '');
       const ext = path.extname(file.originalname || '').slice(0, 20);
       const safeBase = (path.basename(file.originalname || 'material', ext) || 'material').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '_');
       cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeBase}${ext}`);
