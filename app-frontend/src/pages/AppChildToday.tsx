@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { Alert, Button, Card, List, Modal, Space, Switch, Tag, Typography, message } from 'antd';
+import { Button, Card, List, Modal, Progress, Space, Tooltip, Typography, message } from 'antd';
 import { APP_API_BASE, appFetch } from '../api.app';
 
 interface TodayTask {
@@ -23,13 +23,14 @@ interface StatusMeta {
   label: string;
   color: string;
   hint: string;
+  emoji: string;
 }
 
 const STATUS_META: Record<'not_started' | 'in_progress' | 'submitted' | 'done', StatusMeta> = {
-  not_started: { label: '未开始', color: 'default', hint: '先播放音频或视频开始学习' },
-  in_progress: { label: '学习中', color: 'processing', hint: '继续观看/收听，学完后点“完成任务”' },
-  submitted: { label: '已提交', color: 'warning', hint: '已提交，可继续复习后点“完成任务”' },
-  done: { label: '已完成', color: 'success', hint: '今天这条任务已完成' },
+  not_started: { label: '准备开始', color: 'default', hint: '先按“听音频”或“看视频”开始', emoji: '🌱' },
+  in_progress: { label: '学习中', color: 'processing', hint: '继续学一会儿，再点“完成任务”', emoji: '📖' },
+  submitted: { label: '可以完成啦', color: 'warning', hint: '点“完成任务”收下今天的小星星', emoji: '✨' },
+  done: { label: '今天完成', color: 'success', hint: '今天棒棒哒！明天继续', emoji: '🎉' },
 };
 
 const PRAISE_TEXTS = [
@@ -130,6 +131,21 @@ function getTodayCombo(list: TodayTask[] | undefined): number {
     const video = Number((data as Record<string, unknown>).videoPlayCount || 0);
     return acc + Math.max(0, audio + video);
   }, 0);
+}
+
+function hasPlayedOnce(task: TodayTask): boolean {
+  const data = task.progresses?.[0]?.answerData;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const audio = Number((data as Record<string, unknown>).audioPlayCount || 0);
+  const video = Number((data as Record<string, unknown>).videoPlayCount || 0);
+  return audio + video > 0;
+}
+
+function getDayProgress(list: TodayTask[] | undefined): { done: number; total: number; stickers: number } {
+  if (!list?.length) return { done: 0, total: 0, stickers: 0 };
+  const done = list.filter((t) => (t.progresses?.[0]?.status || 'not_started') === 'done').length;
+  const stickers = list.reduce((acc, t) => acc + getTaskStickerCount(t), 0);
+  return { done, total: list.length, stickers };
 }
 
 function getComboHint(combo: number): string {
@@ -561,34 +577,61 @@ export default function AppChildToday() {
 
   const todayCombo = getTodayCombo(data?.list);
   const comboHint = getComboHint(todayCombo);
+  const dayProgress = getDayProgress(data?.list);
+  const progressPercent = dayProgress.total > 0 ? Math.round((dayProgress.done / dayProgress.total) * 100) : 0;
+  const allDone = dayProgress.total > 0 && dayProgress.done === dayProgress.total;
 
   return (
     <div className="app-page-shell child-today-shell">
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
-        <Alert
-          showIcon
-          type="info"
-          message="儿童端今日任务"
-          description={
-            <Space direction="vertical" size={2} style={{ width: '100%' }}>
-              {errorTip ? (
-                <Typography.Text type="danger">{errorTip}</Typography.Text>
-              ) : (
-                <Typography.Text>
-                  {lastActionHint || '点“听音频”或“看视频”开始学习，学完后点“完成任务”。'}
-                </Typography.Text>
-              )}
-              {comboHint ? <Typography.Text strong style={{ color: '#d46b08' }}>{comboHint}</Typography.Text> : null}
-            </Space>
-          }
-        />
+        <div className="child-hero-card">
+          <div className="child-hero-top">
+            <div className="child-hero-title">
+              <span className="child-hero-emoji">{allDone ? '🏆' : '🐣'}</span>
+              <div>
+                <div className="child-hero-name">{data?.child.name ? `${data.child.name}，` : ''}今天加油哦！</div>
+                <div className="child-hero-sub">
+                  {dayProgress.total > 0
+                    ? (allDone ? '今天的任务全部完成啦，太棒了！' : `还差 ${dayProgress.total - dayProgress.done} 个就全部完成`)
+                    : '今天还没有任务，去玩一会儿吧'}
+                </div>
+              </div>
+            </div>
+            <Tooltip title={celebrateSoundEnabled ? '庆祝音效：开（点击关闭）' : '庆祝音效：关（点击开启）'}>
+              <Button
+                shape="circle"
+                size="large"
+                className="child-hero-sound"
+                onClick={() => setCelebrateSoundEnabled((v) => !v)}
+                aria-label="切换庆祝音效"
+              >
+                {celebrateSoundEnabled ? '🔔' : '🔕'}
+              </Button>
+            </Tooltip>
+          </div>
 
-        <Card size="small" className="child-status-card">
-          <Space style={{ justifyContent: 'space-between', width: '100%' }} wrap>
-            <Typography.Text>庆祝音效</Typography.Text>
-            <Switch checked={celebrateSoundEnabled} onChange={setCelebrateSoundEnabled} checkedChildren="开" unCheckedChildren="关" />
-          </Space>
-        </Card>
+          <div className="child-hero-progress">
+            <Progress
+              percent={progressPercent}
+              status={allDone ? 'success' : 'active'}
+              strokeColor={allDone ? { from: '#52c41a', to: '#a0d911' } : { from: '#1677ff', to: '#722ed1' }}
+              format={() => `${dayProgress.done}/${dayProgress.total}`}
+            />
+          </div>
+
+          <div className="child-hero-stars">
+            <span className="child-hero-star-icon">⭐</span>
+            <span className="child-hero-star-count">{dayProgress.stickers}</span>
+            <span className="child-hero-star-text">今天收集的小星星</span>
+          </div>
+
+          {errorTip ? (
+            <div className="child-hero-tip child-hero-tip-error">{errorTip}</div>
+          ) : lastActionHint ? (
+            <div className="child-hero-tip">{lastActionHint}</div>
+          ) : null}
+          {comboHint ? <div className="child-hero-combo">{comboHint}</div> : null}
+        </div>
 
         <Modal
           open={rewardVisible}
@@ -597,43 +640,27 @@ export default function AppChildToday() {
           centered
           width={360}
           onCancel={() => setRewardVisible(false)}
+          className="reward-modal"
         >
-          <style>{`
-            @keyframes reward-pop {
-              0% { transform: scale(0.4) translateY(18px); opacity: 0; }
-              25% { opacity: 1; }
-              100% { transform: scale(1.15) translateY(-22px); opacity: 0; }
-            }
-          `}</style>
-          <Space direction="vertical" align="center" style={{ width: '100%', padding: '12px 0', position: 'relative' }}>
-            <div
-              style={{
-                width: 72,
-                height: 72,
-                borderRadius: '50%',
-                background: 'linear-gradient(180deg, #ffd666 0%, #faad14 100%)',
-                boxShadow: '0 8px 18px rgba(250, 173, 20, 0.35)',
-              }}
-            />
+          <div className="reward-modal-body">
+            <div className="reward-modal-star">🌟</div>
             {rewardBursts.map((dot) => (
               <span
                 key={dot.id}
+                className="reward-burst-emoji"
                 style={{
-                  position: 'absolute',
                   left: `${dot.left}%`,
                   top: `${dot.top}%`,
-                  width: dot.size,
-                  height: dot.size,
-                  borderRadius: '50%',
-                  background: '#ffd666',
-                  animation: `reward-pop 920ms ease-out ${dot.delay}ms forwards`,
-                  pointerEvents: 'none',
+                  fontSize: `${dot.size + 8}px`,
+                  animationDelay: `${dot.delay}ms`,
                 }}
-              />
+              >
+                ⭐
+              </span>
             ))}
-            <Typography.Title level={3} style={{ margin: 0 }}>任务完成</Typography.Title>
-            <Typography.Text style={{ fontSize: 18 }}>{rewardText || '你真棒！'}</Typography.Text>
-          </Space>
+            <div className="reward-modal-headline">真棒！+1 颗小星星</div>
+            <div className="reward-modal-text">{rewardText || '你真棒！'}</div>
+          </div>
         </Modal>
 
         {videoPreview && (
@@ -671,38 +698,37 @@ export default function AppChildToday() {
             renderItem={(item) => {
               const status = item.progresses?.[0]?.status || 'not_started';
               const statusMeta = STATUS_META[status as keyof typeof STATUS_META] || STATUS_META.not_started;
+              const stickerCount = getTaskStickerCount(item);
+              const played = hasPlayedOnce(item);
+              const completeLocked = !played && status !== 'done';
+              const doneBtnTooltip = completeLocked ? '先点“听音频”或“看视频”，才能完成任务哦' : '';
               return (
                 <List.Item>
                   <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                    <Space wrap>
+                    <div className="child-task-head">
                       <Typography.Text strong className="child-task-title">{item.title}</Typography.Text>
-                      <Tag color="blue" style={{ fontSize: 14, padding: '2px 8px' }}>{item.category}</Tag>
-                      <Tag style={{ fontSize: 14, padding: '2px 8px' }}>{`难度 ${item.difficulty}`}</Tag>
-                      <Tag color={statusMeta.color} style={{ fontSize: 14, padding: '2px 8px' }}>{statusMeta.label}</Tag>
-                    </Space>
+                      <span className={`child-task-status status-${status}`}>
+                        <span className="child-task-status-emoji">{statusMeta.emoji}</span>
+                        <span className="child-task-status-label">{statusMeta.label}</span>
+                      </span>
+                    </div>
 
-                    <Space wrap size={8}>
-                      <Typography.Text style={{ fontSize: 16 }}>今日贴纸：</Typography.Text>
-                      {Array.from({ length: Math.max(1, Math.min(8, getTaskStickerCount(item) || 1)) }).map((_, idx) => (
+                    <div className="child-task-stickers">
+                      {Array.from({ length: Math.max(3, Math.min(8, stickerCount || 3)) }).map((_, idx) => (
                         <span
                           key={`${item.id}-sticker-${idx}`}
-                          style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: '50%',
-                            display: 'inline-block',
-                            border: '2px solid #d9d9d9',
-                            background: idx < getTaskStickerCount(item) ? '#ffd666' : '#f5f5f5',
-                          }}
-                        />
+                          className={`child-sticker${idx < stickerCount ? ' is-on' : ''}`}
+                        >
+                          {idx < stickerCount ? '⭐' : '☆'}
+                        </span>
                       ))}
-                      <Typography.Text type="secondary" style={{ fontSize: 14 }}>
-                        {getTaskStickerCount(item) > 0 ? `已收集 ${getTaskStickerCount(item)} 枚` : '播放音频/视频即可解锁贴纸'}
-                      </Typography.Text>
-                    </Space>
+                      <span className="child-task-sticker-text">
+                        {stickerCount > 0 ? `已得 ${stickerCount} 颗` : '听一听 / 看一看，就能得到小星星'}
+                      </span>
+                    </div>
 
-                    <Typography.Text type="secondary" style={{ fontSize: 16 }}>
-                      当前建议：{statusMeta.hint}
+                    <Typography.Text type="secondary" className="child-task-hint">
+                      {statusMeta.hint}
                     </Typography.Text>
 
                     <Space wrap size={12}>
@@ -714,7 +740,7 @@ export default function AppChildToday() {
                         disabled={videoTaskId === item.id || completingTaskId === item.id}
                         onClick={() => onPlayAudio(item)}
                       >
-                        听音频
+                        🔊 听音频
                       </Button>
                       <Button
                         key="video"
@@ -726,19 +752,21 @@ export default function AppChildToday() {
                         disabled={speakingTaskId === item.id || completingTaskId === item.id}
                         onClick={() => onPlayVideo(item)}
                       >
-                        看视频
+                        🎬 看视频
                       </Button>
-                      <Button
-                        key="done"
-                        type="primary"
-                        size="large"
-                        className="child-action-btn primary"
-                        loading={completingTaskId === item.id}
-                        disabled={status === 'done' || speakingTaskId === item.id || videoTaskId === item.id}
-                        onClick={() => postTaskAction(item.id, 'complete')}
-                      >
-                        完成任务
-                      </Button>
+                      <Tooltip title={doneBtnTooltip}>
+                        <Button
+                          key="done"
+                          type="primary"
+                          size="large"
+                          className="child-action-btn primary"
+                          loading={completingTaskId === item.id}
+                          disabled={status === 'done' || completeLocked || speakingTaskId === item.id || videoTaskId === item.id}
+                          onClick={() => postTaskAction(item.id, 'complete')}
+                        >
+                          {status === 'done' ? '✅ 已完成' : '🎯 完成任务'}
+                        </Button>
+                      </Tooltip>
                     </Space>
                   </Space>
                 </List.Item>
