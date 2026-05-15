@@ -1,6 +1,5 @@
-import fs from 'fs';
-import path from 'path';
 import { checkAndRecordBudget } from './cost-guardrails';
+import { extractTextFromMaterial, type ExtractTextSource } from './text-extractor';
 
 export interface RecognitionInput {
   parentId: string;
@@ -28,6 +27,7 @@ export interface RecognitionOutput {
   result: RecognitionResult;
   fallbackReason: string | null;
   costUsd: number;
+  textSource: ExtractTextSource;
 }
 
 function isAiRecognitionEnabled(): boolean {
@@ -36,34 +36,13 @@ function isAiRecognitionEnabled(): boolean {
   return global && local;
 }
 
-function detectTextFromFilename(fileName: string) {
-  const base = path.basename(fileName, path.extname(fileName));
-  return base.replace(/[_-]+/g, ' ').trim();
-}
-
-function resolveUploadFilePath(fileUrl: string) {
-  const relative = fileUrl.replace(/^\/+/, '');
-  return path.resolve(process.cwd(), relative);
-}
-
-function detectTextFromMaterialContent(fileName: string, fileUrl: string, mimeType?: string | null) {
-  const mime = String(mimeType || '').toLowerCase();
-  const ext = path.extname(fileName).toLowerCase();
-
-  if (!fileUrl) return detectTextFromFilename(fileName);
-
-  const canReadAsText = mime.startsWith('text/') || ['.txt', '.md', '.markdown', '.csv'].includes(ext);
-  if (!canReadAsText) return detectTextFromFilename(fileName);
-
-  try {
-    const raw = fs.readFileSync(resolveUploadFilePath(fileUrl), 'utf-8');
-    const normalized = raw.replace(/\s+/g, ' ').trim();
-    if (normalized) return normalized.slice(0, 2400);
-  } catch {
-    // ignore fallback
-  }
-
-  return detectTextFromFilename(fileName);
+async function detectTextFromMaterialContent(
+  fileName: string,
+  fileUrl: string,
+  mimeType?: string | null,
+): Promise<{ text: string; source: ExtractTextSource }> {
+  const out = await extractTextFromMaterial({ fileName, fileUrl, mimeType });
+  return { text: out.text, source: out.source };
 }
 
 function inferCategory(sourceType: string, text: string) {
@@ -96,45 +75,65 @@ function extractKeywords(text: string): string[] {
   return Array.from(new Set(top));
 }
 
-function buildFallbackResult(input: RecognitionInput): RecognitionResult {
-  const extractedText = detectTextFromMaterialContent(input.fileName, input.fileUrl, input.mimeType);
+async function buildFallbackResult(
+  input: RecognitionInput,
+): Promise<{ result: RecognitionResult; textSource: ExtractTextSource }> {
+  const { text: extractedText, source } = await detectTextFromMaterialContent(
+    input.fileName,
+    input.fileUrl,
+    input.mimeType,
+  );
   return {
-    sourceType: input.sourceType,
-    extractedText,
-    suggestedCategory: inferCategory(input.sourceType, extractedText),
-    suggestedDifficulty: inferDifficulty(extractedText),
-    recognizedAt: new Date().toISOString(),
-    provider: 'rule',
-    model: 'local-rule-v1',
-    confidence: 0.65,
-    keywords: extractKeywords(extractedText),
+    result: {
+      sourceType: input.sourceType,
+      extractedText,
+      suggestedCategory: inferCategory(input.sourceType, extractedText),
+      suggestedDifficulty: inferDifficulty(extractedText),
+      recognizedAt: new Date().toISOString(),
+      provider: 'rule',
+      model: 'local-rule-v1',
+      confidence: 0.65,
+      keywords: extractKeywords(extractedText),
+    },
+    textSource: source,
   };
 }
 
-function buildMockAiResult(input: RecognitionInput): RecognitionResult {
-  const raw = detectTextFromMaterialContent(input.fileName, input.fileUrl, input.mimeType);
+async function buildMockAiResult(
+  input: RecognitionInput,
+): Promise<{ result: RecognitionResult; textSource: ExtractTextSource }> {
+  const { text: raw, source } = await detectTextFromMaterialContent(
+    input.fileName,
+    input.fileUrl,
+    input.mimeType,
+  );
   const extractedText = raw.length > 1200 ? raw.slice(0, 1200) : raw;
   return {
-    sourceType: input.sourceType,
-    extractedText,
-    suggestedCategory: inferCategory(input.sourceType, extractedText),
-    suggestedDifficulty: inferDifficulty(extractedText),
-    recognizedAt: new Date().toISOString(),
-    provider: 'mock-ai',
-    model: process.env.APP_AI_RECOGNITION_MODEL || 'mock-deep-recognition-v1',
-    confidence: 0.84,
-    keywords: extractKeywords(extractedText),
+    result: {
+      sourceType: input.sourceType,
+      extractedText,
+      suggestedCategory: inferCategory(input.sourceType, extractedText),
+      suggestedDifficulty: inferDifficulty(extractedText),
+      recognizedAt: new Date().toISOString(),
+      provider: 'mock-ai',
+      model: process.env.APP_AI_RECOGNITION_MODEL || 'mock-deep-recognition-v1',
+      confidence: 0.84,
+      keywords: extractKeywords(extractedText),
+    },
+    textSource: source,
   };
 }
 
 export async function recognizeMaterial(input: RecognitionInput): Promise<RecognitionOutput> {
   if (!isAiRecognitionEnabled()) {
+    const built = await buildFallbackResult(input);
     return {
       status: 'fallback_recognized',
       recognitionStatus: 'fallback',
-      result: buildFallbackResult(input),
+      result: built.result,
       fallbackReason: 'ai_recognition_disabled',
       costUsd: 0,
+      textSource: built.textSource,
     };
   }
 
@@ -145,30 +144,36 @@ export async function recognizeMaterial(input: RecognitionInput): Promise<Recogn
   });
 
   if (!budget.allowed) {
+    const built = await buildFallbackResult(input);
     return {
       status: 'fallback_recognized',
       recognitionStatus: 'fallback',
-      result: buildFallbackResult(input),
+      result: built.result,
       fallbackReason: budget.reason || 'budget_guardrail_blocked',
       costUsd: 0,
+      textSource: built.textSource,
     };
   }
 
   try {
+    const built = await buildMockAiResult(input);
     return {
       status: 'recognized',
       recognitionStatus: 'completed',
-      result: buildMockAiResult(input),
+      result: built.result,
       fallbackReason: null,
       costUsd: estimatedCostUsd,
+      textSource: built.textSource,
     };
   } catch {
+    const built = await buildFallbackResult(input);
     return {
       status: 'fallback_recognized',
       recognitionStatus: 'fallback',
-      result: buildFallbackResult(input),
+      result: built.result,
       fallbackReason: 'ai_recognition_failed',
       costUsd: 0,
+      textSource: built.textSource,
     };
   }
 }

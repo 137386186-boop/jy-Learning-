@@ -11,6 +11,7 @@ import redis from '../lib/redis';
 import { requireAppParent, signAppParentToken, type AppParentTokenPayload } from '../lib/app-auth';
 import { recognizeMaterial } from '../lib/ai-recognition';
 import { generateProfessionalMedia, type MediaKind } from '../lib/media-generation';
+import { extractTextFromMaterial } from '../lib/text-extractor';
 
 // —— 短信验证码登录配置 ——
 const SMS_CODE_TTL_SEC = 5 * 60;
@@ -892,36 +893,18 @@ function inferArtifactType(sourceType: string): ArtifactType {
   return ArtifactType.summary;
 }
 
-function detectTextFromFilename(fileName: string) {
-  const base = path.basename(fileName, path.extname(fileName));
-  return base.replace(/[_-]+/g, ' ').trim();
-}
-
 function resolveUploadFilePath(fileUrl: string) {
   const relative = fileUrl.replace(/^\/+/, '');
   return path.resolve(process.cwd(), relative);
 }
 
-function detectTextFromMaterialContent(content: Record<string, unknown>) {
-  const fileName = String(content.fileName || '');
-  const fileUrl = String(content.fileUrl || '');
-  const mimeType = String(content.mimeType || '').toLowerCase();
-  const ext = path.extname(fileName).toLowerCase();
-
-  if (!fileUrl) return detectTextFromFilename(fileName);
-
-  const canReadAsText = mimeType.startsWith('text/') || ['.txt', '.md', '.markdown', '.csv'].includes(ext);
-  if (!canReadAsText) return detectTextFromFilename(fileName);
-
-  try {
-    const raw = fs.readFileSync(resolveUploadFilePath(fileUrl), 'utf-8');
-    const normalized = raw.replace(/\s+/g, ' ').trim();
-    if (normalized) return normalized.slice(0, 6000);
-  } catch {
-    // ignore fallback
-  }
-
-  return detectTextFromFilename(fileName);
+async function detectTextFromMaterialContent(content: Record<string, unknown>): Promise<string> {
+  const out = await extractTextFromMaterial({
+    fileName: String(content.fileName || ''),
+    fileUrl: String(content.fileUrl || ''),
+    mimeType: String(content.mimeType || ''),
+  });
+  return out.text;
 }
 
 async function processMaterialRecognition(materialId: string, parentId: string) {
@@ -944,12 +927,20 @@ async function processMaterialRecognition(materialId: string, parentId: string) 
     });
 
     const previousCost = Number(content.costUsd || 0);
+    const isUnsupportedFormat =
+      recognized.textSource === 'filename'
+      && !mimeType.toLowerCase().startsWith('image/')
+      && !mimeType.toLowerCase().startsWith('audio/')
+      && !mimeType.toLowerCase().startsWith('video/');
+    const effectiveFallbackReason = isUnsupportedFormat
+      ? 'text_extraction_unsupported'
+      : recognized.fallbackReason;
     const nextContent = {
       ...content,
       status: recognized.status,
       recognitionStatus: recognized.recognitionStatus,
       recognitionResult: recognized.result,
-      fallbackReason: recognized.fallbackReason,
+      fallbackReason: effectiveFallbackReason,
       costUsd: Number.isFinite(previousCost) ? previousCost + recognized.costUsd : recognized.costUsd,
       recognizedAt: recognized.result.recognizedAt,
     } as unknown as Prisma.InputJsonValue;
@@ -1006,7 +997,7 @@ async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams)
       Math.min(3, Number(params.difficulty) || Number(recognition.suggestedDifficulty) || 1)
     );
 
-    const recognitionText = String(recognition.extractedText || '').trim() || detectTextFromMaterialContent(content);
+    const recognitionText = String(recognition.extractedText || '').trim() || await detectTextFromMaterialContent(content);
 
     const mediaGenerated = await generateProfessionalMedia({
       parentId: params.parentId,

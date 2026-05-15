@@ -129,16 +129,22 @@ function getAiStageMeta(recognitionStatus: string, mediaStatus: string) {
 
 function getFallbackReasonText(reason: string) {
   if (!reason) return '';
-  if (reason === 'ai_recognition_disabled') return 'AI识别未开启';
-  if (reason === 'media_generation_disabled') return '专业媒体生成未开启';
-  if (reason === 'daily_budget_exceeded') return '超出日预算，自动回退';
-  if (reason === 'monthly_budget_exceeded') return '超出月预算，自动回退';
-  if (reason === 'daily_request_limit_exceeded') return '超出日请求上限，自动回退';
-  if (reason === 'single_artifact_cost_exceeded') return '单资料预算超限，自动回退';
-  if (reason === 'guardrail_unavailable') return '预算护栏服务不可用，自动回退';
-  if (reason === 'ai_recognition_failed') return 'AI识别失败，自动回退';
-  if (reason === 'media_generation_failed') return '专业媒体生成失败，自动回退';
-  return reason;
+  switch (reason) {
+    case 'ai_recognition_disabled':
+    case 'media_generation_disabled':
+      return '本次使用了基础模式生成（高级模式暂未开放）';
+    case 'budget_guardrail_blocked':
+    case 'media_budget_guardrail_blocked':
+      return '今日高级模式额度已用完，已自动改用基础模式';
+    case 'ai_recognition_failed':
+      return '内容识别遇到问题，已自动改用基础模式';
+    case 'media_generation_failed':
+      return '高级视频生成失败，已自动改用基础模式';
+    case 'text_extraction_unsupported':
+      return '这种文件格式我们暂时还读不出文字，可以试试用拍照/截图上传，或粘贴文字';
+    default:
+      return '';
+  }
 }
 
 const PASSWORD_RULE_REGEX = /^(?=.*[a-zA-Z])(?=.*\d).{8,}$/;
@@ -2354,15 +2360,15 @@ export default function AppLearning() {
                         prefix={<span>📅</span>}
                       />
                       {uploadFile && (
-                        <>
-                          <Button onClick={() => onUploadMaterial(false)} loading={uploading} disabled={uploading || !uploadFile}>仅上传</Button>
-                          <Button type="primary" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
-                            🎙️ 上传并生成音频
-                          </Button>
-                          <Button type="primary" className="hero-cta" onClick={() => onUploadMaterial(true)} loading={uploading} disabled={uploading || !uploadFile}>
-                            🎬 上传并生成视频
-                          </Button>
-                        </>
+                        <Button
+                          type="primary"
+                          className="hero-cta"
+                          onClick={() => onUploadMaterial(false)}
+                          loading={uploading}
+                          disabled={uploading || !uploadFile}
+                        >
+                          ⬆️ 上传到作品库
+                        </Button>
                       )}
                     </Space>
                   </Space>
@@ -2515,7 +2521,6 @@ export default function AppLearning() {
               const isGeneratingAudio = materialBusyId === item.id && materialAction === 'audio';
               const isGeneratingVideo = materialBusyId === item.id && materialAction === 'video';
               const hasFallbackAudio = parsed.mediaStatus === 'fallback' && !resolvedAudioUrl && !!parsed.recognitionText;
-              const hasFallbackVideo = parsed.mediaStatus === 'fallback' && !playableVideoUrl;
               const audioReady = !!resolvedAudioUrl;
               const videoReady = !!playableVideoUrl;
               const showAudioPlayer = audioReady && expandedAudioMaterialId === item.id;
@@ -2612,15 +2617,12 @@ export default function AppLearning() {
                       </Checkbox>
                     </Space>
 
-                    {!!parsed.fallbackReason && (
-                      <Typography.Text type="warning">回退说明：{getFallbackReasonText(parsed.fallbackReason)}</Typography.Text>
-                    )}
-
-                    {hasFallbackVideo && (
-                      <Typography.Text type="secondary">
-                        暂无法生成专业视频{parsed.fallbackReason ? `（${getFallbackReasonText(parsed.fallbackReason)}）` : ''}
-                      </Typography.Text>
-                    )}
+                    {!!parsed.fallbackReason && (() => {
+                      const text = getFallbackReasonText(parsed.fallbackReason);
+                      if (!text) return null;
+                      const tone = parsed.fallbackReason === 'text_extraction_unsupported' ? 'warning' : 'secondary';
+                      return <Typography.Text type={tone}>{text}</Typography.Text>;
+                    })()}
 
                     {audioReady && showAudioPlayer && (
                       <div className="media-frame audio-frame">
