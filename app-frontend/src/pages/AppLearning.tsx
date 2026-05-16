@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Alert, Button, Card, Checkbox, Form, Input, List, Progress, Select, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Form, Input, List, Progress, Select, Slider, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
 import type { FormInstance } from 'antd';
 import dayjs from 'dayjs';
 import { APP_API_BASE, appFetch, appUpload, clearAppToken, getAppToken, setAppToken } from '../api.app';
@@ -130,16 +130,6 @@ function getAiStageMeta(recognitionStatus: string, mediaStatus: string) {
 function getFallbackReasonText(reason: string) {
   if (!reason) return '';
   switch (reason) {
-    case 'ai_recognition_disabled':
-    case 'media_generation_disabled':
-      return '本次使用了基础模式生成（高级模式暂未开放）';
-    case 'budget_guardrail_blocked':
-    case 'media_budget_guardrail_blocked':
-      return '今日高级模式额度已用完，已自动改用基础模式';
-    case 'ai_recognition_failed':
-      return '内容识别遇到问题，已自动改用基础模式';
-    case 'media_generation_failed':
-      return '高级视频生成失败，已自动改用基础模式';
     case 'text_extraction_unsupported':
       return '这种文件格式我们暂时还读不出文字，可以试试用拍照/截图上传，或粘贴文字';
     default:
@@ -276,6 +266,27 @@ export default function AppLearning() {
   const [ocrStage, setOcrStage] = useState<string>('');
   const [ocrPercent, setOcrPercent] = useState(0);
   const [ocrPreview, setOcrPreview] = useState<{ file: File; text: string; thumbUrl: string; title: string } | null>(null);
+
+  // —— 朗读文本（Web Speech TTS）播放器状态 ——
+  type TtsState = {
+    materialId: string;
+    segmentIdx: number;
+    totalSegments: number;
+    totalChars: number;
+    charsBefore: number[];
+    isPaused: boolean;
+  };
+  type TtsCtrl = {
+    pause: () => void;
+    resume: () => void;
+    stop: () => void;
+    seekToSegment: (idx: number) => void;
+    setRate: (rate: number) => void;
+  };
+  const [ttsState, setTtsState] = useState<TtsState | null>(null);
+  const [ttsRate, setTtsRate] = useState<number>(0.85);
+  const ttsRateRef = useRef<number>(0.85);
+  const ttsCtrlRef = useRef<TtsCtrl | null>(null);
 
   // —— 日历看板 & 安排日期相关 ——
   const todayStr = dayjs().format('YYYY-MM-DD');
@@ -1063,6 +1074,8 @@ export default function AppLearning() {
       try { prevCancel(); } catch { /* ignore */ }
     }
     window.speechSynthesis.cancel();
+    ttsCtrlRef.current = null;
+    setTtsState(null);
 
     // 预热 voices：Chrome 首次冷启动若 voices 未就绪，speak 会静默失败
     const ensureVoicesReady = async () => {
@@ -1120,17 +1133,43 @@ export default function AppLearning() {
 
     if (!segments.length) segments.push(content);
 
-    message.loading({ content: `🔊 正在朗读，全文约 ${content.length} 字（共 ${segments.length} 段）…`, key: `speak-${materialId}` });
+    // 计算每段起始字符偏移，用于进度条 tooltip
+    const charsBefore: number[] = [];
+    {
+      let acc = 0;
+      for (const s of segments) {
+        charsBefore.push(acc);
+        acc += s.length;
+      }
+    }
+    const totalChars = content.length;
+
+    message.loading({ content: `🔊 正在朗读，全文约 ${totalChars} 字（共 ${segments.length} 段）…`, key: `speak-${materialId}` });
 
     let idx = 0;
     let stopped = false;
+    let paused = false;
     let advanced = false;
     let watchdog: number | null = null;
+    let runSeq = 0;
+
     const clearWatchdog = () => {
       if (watchdog !== null) {
         window.clearTimeout(watchdog);
         watchdog = null;
       }
+    };
+
+    const publishState = () => {
+      if (stopped) return;
+      setTtsState({
+        materialId,
+        segmentIdx: Math.min(idx, segments.length - 1),
+        totalSegments: segments.length,
+        totalChars,
+        charsBefore,
+        isPaused: paused,
+      });
     };
 
     const advance = (delayMs: number) => {
@@ -1143,22 +1182,30 @@ export default function AppLearning() {
 
     function speakNext() {
       if (stopped) return;
+      if (paused) return;
       if (idx >= segments.length) {
         message.success({ content: `✅ 朗读完成（共 ${segments.length} 段）`, key: `speak-${materialId}` });
+        setTtsState(null);
+        ttsCtrlRef.current = null;
         return;
       }
       advanced = false;
+      const mySeq = ++runSeq;
       const segText = segments[idx];
       const u = new SpeechSynthesisUtterance(segText);
       u.lang = 'zh-CN';
       if (zhVoice) u.voice = zhVoice;
-      u.rate = 0.95;
+      u.rate = ttsRateRef.current;
       u.pitch = 1;
-      u.onend = () => advance(80);
+      u.onend = () => {
+        if (mySeq !== runSeq) return;
+        advance(80);
+      };
       u.onerror = (e) => {
+        if (mySeq !== runSeq) return;
         // 关键 fix：interrupted / canceled 不再视作"用户停止"。
         // 用户停止走显式 __jyLastTtsCancel → stopped=true 路径；其余一律继续下一段。
-        if (stopped) return;
+        if (stopped || paused) return;
         // 留点时间让引擎复位，避免连环 interrupted
         advance(e?.error === 'interrupted' || e?.error === 'canceled' ? 300 : 200);
       };
@@ -1166,11 +1213,13 @@ export default function AppLearning() {
       // Watchdog：单段最多给 30s，超过则强制推进，防止 onend/onerror 都不来卡死
       const estimatedMs = Math.max(8000, segText.length * 220);
       watchdog = window.setTimeout(() => {
-        if (stopped) return;
+        if (stopped || paused) return;
+        if (mySeq !== runSeq) return;
         try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
         advance(200);
       }, Math.min(estimatedMs + 5000, 30000));
 
+      publishState();
       try {
         window.speechSynthesis.speak(u);
       } catch {
@@ -1178,12 +1227,70 @@ export default function AppLearning() {
       }
     }
 
+    const ctrl: TtsCtrl = {
+      pause: () => {
+        if (stopped || paused) return;
+        paused = true;
+        runSeq += 1; // 让当前段的 onend/onerror 失效
+        clearWatchdog();
+        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+        publishState();
+      },
+      resume: () => {
+        if (stopped || !paused) return;
+        paused = false;
+        publishState();
+        speakNext();
+      },
+      stop: () => {
+        stopped = true;
+        paused = false;
+        runSeq += 1;
+        clearWatchdog();
+        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+        message.destroy(`speak-${materialId}`);
+        setTtsState(null);
+        ttsCtrlRef.current = null;
+      },
+      seekToSegment: (target: number) => {
+        if (stopped) return;
+        const next = Math.max(0, Math.min(segments.length - 1, Math.floor(target)));
+        runSeq += 1;
+        clearWatchdog();
+        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+        idx = next;
+        advanced = false;
+        if (paused) {
+          publishState();
+        } else {
+          window.setTimeout(speakNext, 100);
+        }
+      },
+      setRate: (rate: number) => {
+        const clamped = Math.max(0.5, Math.min(1.5, rate));
+        ttsRateRef.current = clamped;
+        if (stopped || paused) return;
+        // 重新从当前段以新速率开始
+        runSeq += 1;
+        clearWatchdog();
+        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+        advanced = false;
+        window.setTimeout(speakNext, 100);
+      },
+    };
+    ttsCtrlRef.current = ctrl;
+
+    publishState();
     speakNext();
 
     (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel = () => {
       stopped = true;
+      paused = false;
+      runSeq += 1;
       clearWatchdog();
       try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+      setTtsState(null);
+      ttsCtrlRef.current = null;
     };
   };
 
@@ -1279,7 +1386,8 @@ export default function AppLearning() {
       audioContext = new AudioContext();
       const destination = audioContext.createMediaStreamDestination();
       const masterGain = audioContext.createGain();
-      masterGain.gain.value = 0.045;
+      // 背景音乐压到很低，把听觉焦点让给字幕/朗读
+      masterGain.gain.value = 0.012;
       masterGain.connect(destination);
 
       // 轻柔背景旋律（更缓慢，营造氛围感）
@@ -1313,7 +1421,8 @@ export default function AppLearning() {
         const startTime = audioContext.currentTime + sceneStarts[s] / 1000;
         const endTime = startTime + 0.35;
         g.gain.setValueAtTime(0, startTime);
-        g.gain.linearRampToValueAtTime(1.6, startTime + 0.04);
+        // 切场景的"叮"音也压低，避免盖住朗读
+        g.gain.linearRampToValueAtTime(0.45, startTime + 0.04);
         g.gain.linearRampToValueAtTime(0.01, endTime);
         osc.start(startTime);
         osc.stop(endTime + 0.02);
@@ -1536,8 +1645,11 @@ export default function AppLearning() {
         ctx.fillStyle = 'rgba(255,255,255,0.97)';
         ctx.fillRect(tailDirL + 1, bubbleY + bubbleH - 2, tailDirR - tailDirL - 2, 4);
 
-        // 气泡内文本（逐字显现）
-        const sentence = scenes[sceneIdx] || '';
+        // 气泡内文本（逐字显现）—— 前缀加上说话角色 emoji，营造一问一答的演绎感
+        const speakerEmoji = speakerIsA ? charA : charB;
+        const rawSentence = scenes[sceneIdx] || '';
+        const isQuestion = sceneIdx % 2 === 0;
+        const sentence = `${speakerEmoji}${isQuestion ? '问' : '答'}：${rawSentence}`;
         const maxCharsPerLine = isPortrait ? 13 : 18;
         const wrapped: string[] = [];
         for (let i = 0; i < sentence.length; i += maxCharsPerLine) {
@@ -2641,6 +2753,60 @@ export default function AppLearning() {
                           src={resolvedAudioUrl}
                           style={{ width: '100%' }}
                         />
+                      </div>
+                    )}
+
+                    {ttsState?.materialId === item.id && (
+                      <div className="media-frame audio-frame" style={{ padding: 12 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                          <Typography.Text strong>🔊 正在朗读 {ttsState.isPaused ? '（已暂停）' : ''}</Typography.Text>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            第 {ttsState.segmentIdx + 1} / {ttsState.totalSegments} 段 · 约 {ttsState.totalChars} 字
+                          </Typography.Text>
+                        </div>
+                        <Slider
+                          min={0}
+                          max={Math.max(0, ttsState.totalSegments - 1)}
+                          step={1}
+                          value={ttsState.segmentIdx}
+                          tooltip={{
+                            formatter: (val) => {
+                              const v = typeof val === 'number' ? val : 0;
+                              const ch = ttsState.charsBefore[v] ?? 0;
+                              const pct = ttsState.totalChars ? Math.round((ch / ttsState.totalChars) * 100) : 0;
+                              return `第 ${v + 1} 段 · ${pct}%`;
+                            },
+                          }}
+                          onChange={(val) => {
+                            ttsCtrlRef.current?.seekToSegment(typeof val === 'number' ? val : 0);
+                          }}
+                        />
+                        <Space wrap size={8} style={{ marginTop: 6 }}>
+                          {ttsState.isPaused ? (
+                            <Button size="small" type="primary" onClick={() => ttsCtrlRef.current?.resume()}>▶️ 继续</Button>
+                          ) : (
+                            <Button size="small" onClick={() => ttsCtrlRef.current?.pause()}>⏸ 暂停</Button>
+                          )}
+                          <Button size="small" onClick={() => ttsCtrlRef.current?.stop()}>⏹ 停止</Button>
+                          <span style={{ fontSize: 12, color: '#8c8c8c' }}>速度</span>
+                          <Select
+                            size="small"
+                            value={ttsRate}
+                            style={{ width: 96 }}
+                            getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                            onChange={(v) => {
+                              setTtsRate(v);
+                              ttsCtrlRef.current?.setRate(v);
+                            }}
+                            options={[
+                              { label: '0.6× 慢', value: 0.6 },
+                              { label: '0.75×', value: 0.75 },
+                              { label: '0.85× 推荐', value: 0.85 },
+                              { label: '1.0× 标准', value: 1.0 },
+                              { label: '1.15× 快', value: 1.15 },
+                            ]}
+                          />
+                        </Space>
                       </div>
                     )}
 
