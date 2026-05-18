@@ -30,6 +30,14 @@ interface MaterialItem {
   content?: unknown;
 }
 
+class MediaGenerateNeedsFallbackError extends Error {
+  reason: 'timeout' | 'cancel';
+  constructor(reason: 'timeout' | 'cancel') {
+    super(reason === 'cancel' ? '已跳过等待，将切换到本地生成' : '专业生成超时，将切换到本地生成');
+    this.reason = reason;
+  }
+}
+
 function resolveAssetUrl(rawUrl: string) {
   const value = rawUrl.trim();
   if (!value) return '';
@@ -294,6 +302,7 @@ export default function AppLearning() {
   const [ttsRate, setTtsRate] = useState<number>(0.85);
   const ttsRateRef = useRef<number>(0.85);
   const ttsCtrlRef = useRef<TtsCtrl | null>(null);
+  const mediaFallbackRequestedRef = useRef<{ materialId: string; kind: 'audio' | 'video' } | null>(null);
 
   // —— 日历看板 & 安排日期相关 ——
   const todayStr = dayjs().format('YYYY-MM-DD');
@@ -711,9 +720,15 @@ export default function AppLearning() {
     materialId: string,
     type: 'recognize' | 'generate',
     maxAttempts = 40,
-    intervalMs = 1200
+    intervalMs = 1200,
+    shouldCancel?: () => boolean
   ): Promise<MaterialItem> => {
     for (let i = 0; i < maxAttempts; i += 1) {
+      if (shouldCancel?.()) {
+        if (type === 'generate') throw new MediaGenerateNeedsFallbackError('cancel');
+        throw new Error('已取消');
+      }
+
       const latest = await fetchMaterialStatus(materialId);
       const parsed = parseMaterialContent(latest.content);
 
@@ -734,7 +749,8 @@ export default function AppLearning() {
       await wait(intervalMs);
     }
 
-    throw new Error(type === 'recognize' ? '识别处理中，请稍后刷新查看结果' : '任务生成处理中，请稍后刷新查看结果');
+    if (type === 'generate') throw new MediaGenerateNeedsFallbackError('timeout');
+    throw new Error('识别处理中，请稍后刷新查看结果');
   };
 
   const triggerCelebration = () => {
@@ -1015,6 +1031,11 @@ export default function AppLearning() {
     setMaterialBusyId(materialId);
     setMaterialAction(kind);
     setMediaStage({ materialId, kind, phase: 'recognize', startedAt: Date.now() });
+    mediaFallbackRequestedRef.current = null;
+    const isCancelled = () => {
+      const req = mediaFallbackRequestedRef.current;
+      return !!req && req.materialId === materialId && req.kind === kind;
+    };
     try {
       await triggerMaterialRecognize(materialId);
       await pollMaterialUntilDone(materialId, 'recognize');
@@ -1024,7 +1045,17 @@ export default function AppLearning() {
         mediaKind: kind,
         titlePrefix: kind === 'audio' ? '音频生成' : '视频生成',
       });
-      await pollMaterialUntilDone(materialId, 'generate');
+
+      let fallbackReason: 'timeout' | 'cancel' | null = null;
+      try {
+        await pollMaterialUntilDone(materialId, 'generate', 21, 1200, isCancelled);
+      } catch (err) {
+        if (err instanceof MediaGenerateNeedsFallbackError) {
+          fallbackReason = err.reason;
+        } else {
+          throw err;
+        }
+      }
 
       const latest = await fetchMaterialStatus(materialId);
       const parsed = parseMaterialContent(latest.content);
@@ -1037,10 +1068,19 @@ export default function AppLearning() {
           return;
         }
         if (parsed.recognitionText) {
+          if (fallbackReason === 'timeout') {
+            message.info('专业生成超时，已切换为本地朗读');
+          } else if (fallbackReason === 'cancel') {
+            message.info('已跳过等待，切换为本地朗读');
+          }
           await onPlayMaterialAudio(materialId, parsed.recognitionText);
           return;
         }
-        message.warning('暂未获得音频地址，请稍后重试');
+        if (fallbackReason) {
+          message.error('专业生成超时，且未获得可朗读文本');
+        } else {
+          message.warning('暂未获得音频地址，请稍后重试');
+        }
         return;
       }
 
@@ -1050,6 +1090,11 @@ export default function AppLearning() {
         return;
       }
       if (parsed.recognitionText) {
+        if (fallbackReason === 'timeout') {
+          message.info('专业生成超时，已切换为本地生成');
+        } else if (fallbackReason === 'cancel') {
+          message.info('已跳过等待，切换为本地生成');
+        }
         setMediaStage({ materialId, kind, phase: 'render', startedAt: Date.now() });
         const localVideoUrl = await onGenerateMaterialVideo(materialId, parsed.fileName, parsed.recognitionText, 'landscape');
         if (localVideoUrl) {
@@ -1057,11 +1102,16 @@ export default function AppLearning() {
           return;
         }
       }
-      message.warning('暂未获得视频地址，请稍后重试');
+      if (fallbackReason) {
+        message.error('专业生成超时，且未获得可用文本，无法本地生成');
+      } else {
+        message.warning('暂未获得视频地址，请稍后重试');
+      }
     } catch (e) {
       message.error(e instanceof Error ? e.message : kind === 'audio' ? '音频生成失败，请稍后重试' : '视频生成失败，请稍后重试');
       await reloadAll();
     } finally {
+      mediaFallbackRequestedRef.current = null;
       setMaterialBusyId(null);
       setMaterialAction(null);
       setMediaStage(null);
@@ -2901,6 +2951,18 @@ export default function AppLearning() {
                             ? (showVideoPlayer ? '⏸ 收起' : '▶️ 播放视频')
                             : '🎬 生成视频'}
                       </Button>
+                      {stageForItem && stageForItem.phase === 'generate' && (
+                        <Button
+                          type="link"
+                          size="small"
+                          onClick={() => {
+                            mediaFallbackRequestedRef.current = { materialId: item.id, kind: stageForItem.kind };
+                            message.info('已请求跳过等待，正在切到本地生成…');
+                          }}
+                        >
+                          ⏭ 跳过等待，本地生成
+                        </Button>
+                      )}
                     </Space>
                   </Space>
                 </List.Item>
