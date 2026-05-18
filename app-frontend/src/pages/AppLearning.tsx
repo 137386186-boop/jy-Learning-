@@ -250,6 +250,13 @@ export default function AppLearning() {
   const [expandedAudioMaterialId, setExpandedAudioMaterialId] = useState<string | null>(null);
   const [expandedVideoMaterialId, setExpandedVideoMaterialId] = useState<string | null>(null);
   const [generatedVideoUrls, setGeneratedVideoUrls] = useState<Record<string, string>>({});
+  const [mediaStage, setMediaStage] = useState<{ materialId: string; kind: 'audio' | 'video'; phase: 'recognize' | 'generate' | 'render'; startedAt: number } | null>(null);
+  const [, setMediaStageTick] = useState(0);
+  useEffect(() => {
+    if (!mediaStage) return;
+    const t = window.setInterval(() => setMediaStageTick((x) => x + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [mediaStage]);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadChildId, setUploadChildId] = useState<string | undefined>(undefined);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -1007,10 +1014,12 @@ export default function AppLearning() {
   const onGenerateMaterialProduct = async (materialId: string, kind: 'audio' | 'video') => {
     setMaterialBusyId(materialId);
     setMaterialAction(kind);
+    setMediaStage({ materialId, kind, phase: 'recognize', startedAt: Date.now() });
     try {
       await triggerMaterialRecognize(materialId);
       await pollMaterialUntilDone(materialId, 'recognize');
 
+      setMediaStage({ materialId, kind, phase: 'generate', startedAt: Date.now() });
       await triggerMaterialTaskGeneration(materialId, {
         mediaKind: kind,
         titlePrefix: kind === 'audio' ? '音频生成' : '视频生成',
@@ -1041,6 +1050,7 @@ export default function AppLearning() {
         return;
       }
       if (parsed.recognitionText) {
+        setMediaStage({ materialId, kind, phase: 'render', startedAt: Date.now() });
         const localVideoUrl = await onGenerateMaterialVideo(materialId, parsed.fileName, parsed.recognitionText, 'landscape');
         if (localVideoUrl) {
           setExpandedVideoMaterialId(materialId);
@@ -1054,6 +1064,7 @@ export default function AppLearning() {
     } finally {
       setMaterialBusyId(null);
       setMaterialAction(null);
+      setMediaStage(null);
     }
   };
 
@@ -2632,6 +2643,18 @@ export default function AppLearning() {
               const playableVideoUrl = resolvedVideoUrl || localVideoUrl;
               const isGeneratingAudio = materialBusyId === item.id && materialAction === 'audio';
               const isGeneratingVideo = materialBusyId === item.id && materialAction === 'video';
+              const stageForItem = mediaStage && mediaStage.materialId === item.id ? mediaStage : null;
+              const stageElapsedSec = stageForItem ? Math.max(0, Math.floor((Date.now() - stageForItem.startedAt) / 1000)) : 0;
+              const videoStagePhrase = stageForItem && stageForItem.kind === 'video'
+                ? (stageForItem.phase === 'recognize' ? '识别字幕中'
+                  : stageForItem.phase === 'generate' ? '生成视频中'
+                  : '本地渲染中')
+                : null;
+              const audioStagePhrase = stageForItem && stageForItem.kind === 'audio'
+                ? (stageForItem.phase === 'recognize' ? '识别字幕中'
+                  : stageForItem.phase === 'generate' ? '合成音频中'
+                  : '本地朗读中')
+                : null;
               const hasFallbackAudio = parsed.mediaStatus === 'fallback' && !resolvedAudioUrl && !!parsed.recognitionText;
               const audioReady = !!resolvedAudioUrl;
               const videoReady = !!playableVideoUrl;
@@ -2853,9 +2876,11 @@ export default function AppLearning() {
                           void onGenerateMaterialProduct(item.id, 'audio');
                         }}
                       >
-                        {audioReady
-                          ? (showAudioPlayer ? '⏸ 收起' : '▶️ 播放音频')
-                          : (hasFallbackAudio ? '🔊 朗读文本' : '🎙️ 生成音频')}
+                        {isGeneratingAudio
+                          ? `${audioStagePhrase ?? '🎙️ 准备中'}… ${stageElapsedSec}s`
+                          : audioReady
+                            ? (showAudioPlayer ? '⏸ 收起' : '▶️ 播放音频')
+                            : (hasFallbackAudio ? '🔊 朗读文本' : '🎙️ 生成音频')}
                       </Button>
                       <Button
                         size="small"
@@ -2870,9 +2895,11 @@ export default function AppLearning() {
                           void onGenerateMaterialProduct(item.id, 'video');
                         }}
                       >
-                        {videoReady
-                          ? (showVideoPlayer ? '⏸ 收起' : '▶️ 播放视频')
-                          : '🎬 生成视频'}
+                        {isGeneratingVideo
+                          ? `${videoStagePhrase ?? '🎬 准备中'}… ${stageElapsedSec}s`
+                          : videoReady
+                            ? (showVideoPlayer ? '⏸ 收起' : '▶️ 播放视频')
+                            : '🎬 生成视频'}
                       </Button>
                     </Space>
                   </Space>
