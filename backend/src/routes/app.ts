@@ -12,6 +12,7 @@ import { requireAppParent, signAppParentToken, type AppParentTokenPayload } from
 import { recognizeMaterial } from '../lib/ai-recognition';
 import { generateProfessionalMedia, type MediaKind } from '../lib/media-generation';
 import { extractTextFromMaterial } from '../lib/text-extractor';
+import { synthesizeEdgeTts } from '../lib/edge-tts';
 
 // —— 短信验证码登录配置 ——
 const SMS_CODE_TTL_SEC = 5 * 60;
@@ -52,6 +53,15 @@ const writeLimiter = rateLimit({
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
+});
+
+// TTS 走免费的 Edge TTS，限频比 writeLimiter 更紧，避免被微软封我们的 IP
+const ttsLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'tts_rate_limited' },
 });
 
 function getParent(req: Request): AppParentTokenPayload | null {
@@ -1468,6 +1478,37 @@ router.post('/library/materials/cleanup', requireAppParent, writeLimiter, async 
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
+  }
+});
+
+// 文字转语音：把孩子上传的题目/绘本正文用云希活泼男声读出来，前端会把 mp3 当作旁白
+// 混进 MediaRecorder 来生成"有讲解"的学习视频，也可以单独当朗读音频用。
+router.post('/tts', requireAppParent, ttsLimiter, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const text = String(body.text || '').trim();
+    if (!text) {
+      res.status(400).json({ error: 'tts_empty_text' });
+      return;
+    }
+    if (text.length > 2400) {
+      res.status(400).json({ error: 'tts_text_too_long' });
+      return;
+    }
+    const voice = typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : 'zh-CN-YunxiNeural';
+    const rate = typeof body.rate === 'string' && body.rate.trim() ? body.rate.trim() : '-4%';
+    const buf = await synthesizeEdgeTts(text, { voice, rate });
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(buf);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'tts_failed';
+    res.status(502).json({ error: msg });
   }
 });
 

@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Form, Input, List, Progress, Select, Sli
 import type { FormInstance } from 'antd';
 import dayjs from 'dayjs';
 import { APP_API_BASE, appFetch, appUpload, clearAppToken, getAppToken, setAppToken } from '../api.app';
-import { recognizeImageText, isLikelyImage } from '../lib/ocr';
+import { recognizeImageText, isLikelyImage, sanitizeOcrText } from '../lib/ocr';
 
 interface ParentUser {
   id: string;
@@ -884,14 +884,14 @@ export default function AppLearning() {
         else if (p.stage === 'recognizing') setOcrStage('🔍 AI 正在识别图片文字…');
         else setOcrStage('✅ 识别完成');
       });
-      const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+      const cleaned = sanitizeOcrText(text || '');
       const baseTitle = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || '拍照学习';
       const thumbUrl = URL.createObjectURL(file);
-      setOcrPreview({ file, text: cleaned || '', thumbUrl, title: baseTitle });
+      setOcrPreview({ file, text: cleaned, thumbUrl, title: baseTitle });
       if (!cleaned) {
-        message.warning('没有识别到清晰的文字，你可以手动在文本框里输入');
+        message.warning('图片里没有识别到清晰文字（可能是插画/手写），请在下方文本框手动输入要朗读的内容');
       } else {
-        message.success(`✅ 识别到 ${cleaned.length} 个字，可编辑后生成音频或视频`);
+        message.success(`✅ 识别到 ${cleaned.length} 个字，请检查并编辑后再生成音视频`);
       }
     } catch (e) {
       message.error(e instanceof Error ? e.message : '识别失败，请稍后重试');
@@ -913,7 +913,7 @@ export default function AppLearning() {
     document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
   };
 
-  // 把当前 OCR 文本保存到作品库（伪装成粘贴文本流程）
+  // 把当前 OCR 文本保存到作品库（轻量保存，不触发后端 AI 识别/生成）
   const onSaveOcrToLibrary = async () => {
     if (!ocrPreview) return;
     const txt = ocrPreview.text.trim();
@@ -924,7 +924,9 @@ export default function AppLearning() {
     const safeTitle = (ocrPreview.title || '拍照学习').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || 'photo';
     const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
     const txtFile = new File([blob], `${safeTitle}.txt`, { type: 'text/plain' });
-    await onUploadMaterial(true, txtFile);
+    // 用 autoGenerateTask=false：只保存文本，不再展示"正在生成音视频"。
+    // 用户在作品库列表里可单独点"朗读 / 生成视频"。
+    await onUploadMaterial(false, txtFile);
     onClearOcrPreview();
   };
 
@@ -960,6 +962,8 @@ export default function AppLearning() {
 
   const onDeleteMaterial = async (materialId: string) => {
     setDeletingMaterialId(materialId);
+    try { window.speechSynthesis?.cancel(); } catch { /* ignore */ }
+    setTtsState(null);
     try {
       const res = await appFetch(`${APP_API_BASE}/library/materials/${materialId}`, {
         method: 'DELETE',
@@ -1119,7 +1123,9 @@ export default function AppLearning() {
   };
 
   const onPlayMaterialAudio = async (materialId: string, text: string) => {
-    const content = text.trim();
+    // 朗读前再次清洗，过滤旧素材里的 OCR 乱码，避免出现"读出一堆乱码"的尴尬
+    const sanitized = sanitizeOcrText(text);
+    const content = (sanitized || text).trim();
     if (!content) {
       message.warning('请先完成识别，拿到文本后再生成音频');
       return;
@@ -1361,7 +1367,9 @@ export default function AppLearning() {
     text: string,
     orientation: 'landscape' | 'portrait'
   ): Promise<string | null> => {
-    const content = text.trim();
+    // 防御性二次清洗：旧素材里如果残留 OCR 乱码，也不会被绘到画面/字幕上
+    const sanitized = sanitizeOcrText(text);
+    const content = (sanitized || text).trim();
     if (!content) {
       message.warning('请先完成识别，拿到文本后再生成视频');
       return null;
@@ -1370,6 +1378,13 @@ export default function AppLearning() {
       message.error('当前浏览器不支持视频生成');
       return null;
     }
+
+    // iOS 摇一摇会触发"撤销操作"系统弹窗，一旦点了撤销当前正在录制的视频流就会被打断。
+    // 关闭键盘 + 让所有可撤销的文本输入失去焦点，可以最大程度减少弹窗的概率。
+    try {
+      const active = document.activeElement as (HTMLElement & { blur?: () => void }) | null;
+      active?.blur?.();
+    } catch { /* ignore */ }
 
     const isPortrait = orientation === 'portrait';
     const videoKey = `${materialId}-${orientation}`;
@@ -1394,8 +1409,8 @@ export default function AppLearning() {
     const rawTotal = rawDurations.reduce((a, b) => a + b, 0);
     const targetTotal = Math.min(58000, Math.max(9000, rawTotal));
     const durScale = targetTotal / rawTotal;
-    const sceneDurations = rawDurations.map((d) => Math.round(d * durScale));
-    const sceneStarts: number[] = [];
+    let sceneDurations = rawDurations.map((d) => Math.round(d * durScale));
+    let sceneStarts: number[] = [];
     {
       let acc = 0;
       for (const d of sceneDurations) {
@@ -1403,7 +1418,7 @@ export default function AppLearning() {
         acc += d;
       }
     }
-    const durationMs = sceneStarts[sceneStarts.length - 1] + sceneDurations[sceneDurations.length - 1];
+    let durationMs = sceneStarts[sceneStarts.length - 1] + sceneDurations[sceneDurations.length - 1];
 
     // ---- 双角色 ----
     const animals = ['🦊', '🐱', '🐻', '🐯', '🐼', '🐰', '🐨', '🦁', '🐧', '🐸', '🐵', '🐶'];
@@ -1445,7 +1460,24 @@ export default function AppLearning() {
     ];
     const mimeType = preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) || '';
 
-    message.loading({ content: `🎬 正在演绎成${isPortrait ? '竖屏' : '横屏'}视频…`, key: `video-${videoKey}` });
+    message.loading({ content: `🎬 正在生成${isPortrait ? '竖屏' : '横屏'}视频，请保持手机平稳、不要摇晃…`, key: `video-${videoKey}` });
+
+    // 先把朗读 mp3 拿到手；TTS 失败也允许继续，但只有 BGM，没有旁白
+    let narrationArrayBuf: ArrayBuffer | null = null;
+    try {
+      const ttsRes = await appFetch(`${APP_API_BASE}/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: content.slice(0, 2400) }),
+      });
+      if (ttsRes.ok) {
+        narrationArrayBuf = await ttsRes.arrayBuffer();
+      } else {
+        message.warning('旁白合成失败，视频将仅含背景音乐');
+      }
+    } catch {
+      message.warning('旁白合成失败，视频将仅含背景音乐');
+    }
 
     let audioContext: AudioContext | null = null;
     try {
@@ -1456,6 +1488,40 @@ export default function AppLearning() {
       // 背景音乐压到很低，把听觉焦点让给字幕/朗读
       masterGain.gain.value = 0.012;
       masterGain.connect(destination);
+
+      // 解码旁白 mp3 并接入到 destination；narration 独立 gain，远大于 BGM
+      let narrationBuffer: AudioBuffer | null = null;
+      let narrationSource: AudioBufferSourceNode | null = null;
+      if (narrationArrayBuf && narrationArrayBuf.byteLength > 0) {
+        try {
+          narrationBuffer = await audioContext.decodeAudioData(narrationArrayBuf.slice(0));
+        } catch {
+          narrationBuffer = null;
+        }
+      }
+
+      // 如果旁白比当前时长更长，按比例放大每幕时长，确保旁白完整播完才停录
+      if (narrationBuffer) {
+        const narrationDurationMs = Math.ceil(narrationBuffer.duration * 1000);
+        const needed = narrationDurationMs + 800;
+        if (needed > durationMs) {
+          const scale = needed / durationMs;
+          sceneDurations = sceneDurations.map((d) => Math.round(d * scale));
+          sceneStarts = [];
+          let acc = 0;
+          for (const d of sceneDurations) {
+            sceneStarts.push(acc);
+            acc += d;
+          }
+          durationMs = sceneStarts[sceneStarts.length - 1] + sceneDurations[sceneDurations.length - 1];
+        }
+        const narrationGain = audioContext.createGain();
+        narrationGain.gain.value = 1.0;
+        narrationGain.connect(destination);
+        narrationSource = audioContext.createBufferSource();
+        narrationSource.buffer = narrationBuffer;
+        narrationSource.connect(narrationGain);
+      }
 
       // 轻柔背景旋律（更缓慢，营造氛围感）
       const beatMs = 720;
@@ -1783,6 +1849,12 @@ export default function AppLearning() {
           cleanup();
           reject(err instanceof Error ? err : new Error('video_recorder_start_failed'));
           return;
+        }
+        // 录制一启动就开始播放旁白；留 0.15s 给 MediaRecorder 抓首帧，避免吞掉开头
+        if (narrationSource && audioContext) {
+          try {
+            narrationSource.start(audioContext.currentTime + 0.15);
+          } catch { /* ignore */ }
         }
         draw();
         stopWatchdog = window.setTimeout(() => {
@@ -2506,6 +2578,9 @@ export default function AppLearning() {
                               placeholder="识别结果（可编辑）"
                             />
                           )}
+                          <div style={{ marginTop: 8, fontSize: 12, color: '#8c8c8c', lineHeight: 1.6 }}>
+                            👉 先点 <b>朗读</b> 或 <b>生成视频</b> 听听/看看效果，满意后再点 <b>保存</b> 收进作品库；保存只存文字，不会再次生成音视频。
+                          </div>
                           <Space wrap size={8} style={{ marginTop: 8 }}>
                             <Button
                               type="primary"
@@ -2520,7 +2595,7 @@ export default function AppLearning() {
                                   setMaterialAction(null);
                                 });
                               }}
-                            >生成并朗读音频</Button>
+                            >朗读这段文字</Button>
                             <Button
                               icon={<span>🎬</span>}
                               disabled={!hasText || isVideoBusy}
@@ -2535,13 +2610,14 @@ export default function AppLearning() {
                                   setMaterialAction(null);
                                 }
                               }}
-                            >生成视频</Button>
+                            >生成学习视频</Button>
                             <Button
+                              type="text"
                               icon={<span>💾</span>}
                               loading={uploading}
                               disabled={!hasText || uploading}
                               onClick={onSaveOcrToLibrary}
-                            >保存到作品库</Button>
+                            >仅保存文字到作品库</Button>
                           </Space>
                         </div>
                       );

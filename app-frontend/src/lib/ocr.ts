@@ -118,3 +118,33 @@ export function isLikelyImage(file: File | Blob | null | undefined): boolean {
   const type = (file as File).type || '';
   return type.startsWith('image/');
 }
+
+// 过滤 OCR 乱码：拍课本/题卡时 Tesseract 经常返回大量非中文非英文的"噪声字符"
+// 策略：按行评估，单行中"有效字符"（中文/英文/数字/常见标点）占比 < 60% 或有效字符 < 2 时丢弃
+const VALID_CHAR_RE = /[一-鿿㐀-䶿A-Za-z0-9\s，。？！、：；""''《》（）()【】\-+=×÷./%]/;
+
+function lineSignalRatio(line: string): { ratio: number; valid: number } {
+  const trimmed = line.trim();
+  if (!trimmed) return { ratio: 0, valid: 0 };
+  let valid = 0;
+  for (const ch of trimmed) {
+    if (VALID_CHAR_RE.test(ch)) valid += 1;
+  }
+  return { ratio: valid / trimmed.length, valid };
+}
+
+export function sanitizeOcrText(raw: string): string {
+  if (!raw) return '';
+  const lines = raw.split(/\r?\n/);
+  const kept: string[] = [];
+  for (const line of lines) {
+    const { ratio, valid } = lineSignalRatio(line);
+    if (ratio >= 0.6 && valid >= 2) kept.push(line.trim());
+  }
+  const out = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  // 整体再检查一次：如果全文有效中文/英文字符过少（<4），视为无识别结果
+  let totalValid = 0;
+  for (const ch of out) if (VALID_CHAR_RE.test(ch)) totalValid += 1;
+  if (totalValid < 4) return '';
+  return out;
+}
