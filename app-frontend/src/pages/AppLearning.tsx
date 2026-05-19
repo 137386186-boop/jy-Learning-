@@ -272,7 +272,6 @@ export default function AppLearning() {
   const uploadAbortRef = useRef<(() => void) | null>(null);
   const [directMediaTitle, setDirectMediaTitle] = useState('家庭学习音视频');
   const [directMediaText, setDirectMediaText] = useState('');
-  const [selectedMaterialIds, setSelectedMaterialIds] = useState<string[]>([]);
   const [deletingMaterialId, setDeletingMaterialId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
@@ -281,6 +280,7 @@ export default function AppLearning() {
   const [ocrStage, setOcrStage] = useState<string>('');
   const [ocrPercent, setOcrPercent] = useState(0);
   const [ocrPreview, setOcrPreview] = useState<{ file: File; text: string; thumbUrl: string; title: string } | null>(null);
+  const [ocrTextRevealed, setOcrTextRevealed] = useState(false);
 
   // —— 朗读文本（Web Speech TTS）播放器状态 ——
   type TtsState = {
@@ -299,8 +299,8 @@ export default function AppLearning() {
     setRate: (rate: number) => void;
   };
   const [ttsState, setTtsState] = useState<TtsState | null>(null);
-  const [ttsRate, setTtsRate] = useState<number>(0.85);
-  const ttsRateRef = useRef<number>(0.85);
+  const [ttsRate, setTtsRate] = useState<number>(0.75);
+  const ttsRateRef = useRef<number>(0.75);
   const ttsCtrlRef = useRef<TtsCtrl | null>(null);
   const mediaFallbackRequestedRef = useRef<{ materialId: string; kind: 'audio' | 'video' } | null>(null);
 
@@ -873,6 +873,7 @@ export default function AppLearning() {
       try { URL.revokeObjectURL(ocrPreview.thumbUrl); } catch { /* ignore */ }
     }
     setOcrPreview(null);
+    setOcrTextRevealed(false);
     setOcrBusy(true);
     setOcrPercent(2);
     setOcrStage('📦 正在准备识别模型…');
@@ -908,6 +909,7 @@ export default function AppLearning() {
       try { URL.revokeObjectURL(ocrPreview.thumbUrl); } catch { /* ignore */ }
     }
     setOcrPreview(null);
+    setOcrTextRevealed(false);
     document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
   };
 
@@ -967,7 +969,6 @@ export default function AppLearning() {
         message.error(getApiErrorMessage(data, '删除资料失败', res.status));
         return;
       }
-      setSelectedMaterialIds((prev) => prev.filter((id) => id !== materialId));
       message.success('已删除');
       await reloadAll();
     } catch {
@@ -993,7 +994,6 @@ export default function AppLearning() {
       }
       const removed = data && typeof data === 'object' ? Number((data as Record<string, unknown>).removed || 0) : 0;
       message.success(removed > 0 ? `已清理 ${removed} 条资料` : '没有需要清理的资料');
-      setSelectedMaterialIds([]);
       await reloadAll();
     } catch {
       message.error('清理失败，请稍后重试');
@@ -1328,7 +1328,7 @@ export default function AppLearning() {
         }
       },
       setRate: (rate: number) => {
-        const clamped = Math.max(0.5, Math.min(1.5, rate));
+        const clamped = Math.max(0.5, Math.min(2.0, rate));
         ttsRateRef.current = clamped;
         if (stopped || paused) return;
         // 重新从当前段以新速率开始
@@ -1436,7 +1436,13 @@ export default function AppLearning() {
       ctx.closePath();
     };
 
-    const preferredTypes = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const preferredTypes = [
+      'video/mp4;codecs=h264',
+      'video/mp4',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm',
+    ];
     const mimeType = preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) || '';
 
     message.loading({ content: `🎬 正在演绎成${isPortrait ? '竖屏' : '横屏'}视频…`, key: `video-${videoKey}` });
@@ -1755,18 +1761,50 @@ export default function AppLearning() {
       };
 
       await new Promise<void>((resolve, reject) => {
-        recorder.onerror = () => reject(new Error('video_recorder_error'));
-        recorder.onstop = () => resolve();
-        recorder.start(200);
-        draw();
-        window.setTimeout(() => {
+        let stopWatchdog = 0;
+        let hardWatchdog = 0;
+        const cleanup = () => {
+          window.clearTimeout(stopWatchdog);
+          window.clearTimeout(hardWatchdog);
           cancelAnimationFrame(raf);
-          if (recorder.state !== 'inactive') recorder.stop();
           mixedStream.getTracks().forEach((track) => track.stop());
+        };
+        recorder.onerror = () => {
+          cleanup();
+          reject(new Error('video_recorder_error'));
+        };
+        recorder.onstop = () => {
+          cleanup();
+          resolve();
+        };
+        try {
+          recorder.start(200);
+        } catch (err) {
+          cleanup();
+          reject(err instanceof Error ? err : new Error('video_recorder_start_failed'));
+          return;
+        }
+        draw();
+        stopWatchdog = window.setTimeout(() => {
+          cancelAnimationFrame(raf);
+          try {
+            if (recorder.state !== 'inactive') recorder.stop();
+          } catch {
+            /* ignore */
+          }
         }, durationMs);
+        hardWatchdog = window.setTimeout(() => {
+          cleanup();
+          try {
+            if (recorder.state !== 'inactive') recorder.stop();
+          } catch {
+            /* ignore */
+          }
+          reject(new Error('video_recorder_timeout'));
+        }, durationMs + 15000);
       });
 
-      const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
+      const blob = new Blob(chunks, { type: mimeType || 'video/mp4' });
       const url = URL.createObjectURL(blob);
       if (materialId === 'direct-text') {
         setGeneratedVideoUrls((prev) => ({
@@ -1784,8 +1822,15 @@ export default function AppLearning() {
 
       message.success({ content: `${isPortrait ? '竖屏' : '横屏'}视频生成完成，可直接在线播放`, key: `video-${videoKey}` });
       return url;
-    } catch {
-      message.error({ content: '视频生成失败，请稍后重试', key: `video-${videoKey}` });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : '';
+      const hint =
+        reason === 'video_recorder_timeout'
+          ? '本地渲染超时，已自动中止。建议改用音频，或在 WiFi 环境重试。'
+          : reason === 'video_recorder_start_failed'
+            ? '当前浏览器不支持本地视频录制，请改用音频，或换浏览器重试。'
+            : '视频生成失败，请稍后重试或改用音频';
+      message.error({ content: hint, key: `video-${videoKey}` });
       return null;
     } finally {
       if (audioContext) {
@@ -2336,18 +2381,6 @@ export default function AppLearning() {
         extra={
           materials.length > 0 ? (
             <Space>
-              {selectedMaterialIds.length > 0 && (
-                <Popconfirm
-                  title={`确认删除已选 ${selectedMaterialIds.length} 条资料？`}
-                  description="将连同生成的音视频一起删除，不可恢复。"
-                  okText="删除"
-                  cancelText="取消"
-                  okButtonProps={{ danger: true }}
-                  onConfirm={() => onCleanupMaterials(selectedMaterialIds)}
-                >
-                  <Button danger size="small" loading={cleanupBusy}>批量删除 ({selectedMaterialIds.length})</Button>
-                </Popconfirm>
-              )}
               <Popconfirm
                 title="确认清空全部资料？"
                 description="将删除所有上传的资料及其生成的音视频，不可恢复。"
@@ -2448,19 +2481,31 @@ export default function AppLearning() {
                                 placeholder="作品名称"
                               />
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                ✅ 识别到 {ocrPreview.text.length} 字 · 可编辑后用于生成音/视频
+                                ✅ 已识别 {ocrPreview.text.length} 字，可直接生成音频或视频
                               </Typography.Text>
                             </div>
                             <Button size="small" type="text" onClick={onClearOcrPreview}>✕</Button>
                           </div>
-                          <Input.TextArea
-                            value={ocrPreview.text}
-                            onChange={(e) => setOcrPreview({ ...ocrPreview, text: e.target.value })}
-                            autoSize={{ minRows: 3, maxRows: 8 }}
-                            maxLength={2400}
-                            showCount
-                            placeholder="OCR 识别结果（可编辑）"
-                          />
+                          <div style={{ marginTop: 8 }}>
+                            <Button
+                              size="small"
+                              type="link"
+                              style={{ paddingLeft: 0 }}
+                              onClick={() => setOcrTextRevealed((v) => !v)}
+                            >
+                              {ocrTextRevealed ? '收起识别文本' : '查看/编辑识别文本'}
+                            </Button>
+                          </div>
+                          {ocrTextRevealed && (
+                            <Input.TextArea
+                              value={ocrPreview.text}
+                              onChange={(e) => setOcrPreview({ ...ocrPreview, text: e.target.value })}
+                              autoSize={{ minRows: 3, maxRows: 8 }}
+                              maxLength={2400}
+                              showCount
+                              placeholder="识别结果（可编辑）"
+                            />
+                          )}
                           <Space wrap size={8} style={{ marginTop: 8 }}>
                             <Button
                               type="primary"
@@ -2718,20 +2763,11 @@ export default function AppLearning() {
                 : /\.(doc|docx|ppt|pptx|xls|xlsx)$/.test(lowerName) ? '📄'
                 : /\.(txt|md|markdown|csv)$/.test(lowerName) ? '📝'
                 : '📦';
-              const isSelected = selectedMaterialIds.includes(item.id);
               return (
                 <List.Item className="list-item-soft material-list-item">
                   <Space direction="vertical" size={8} style={{ width: '100%' }}>
                     <div className="material-header-row">
                       <Space wrap size={8}>
-                        <Checkbox
-                          checked={isSelected}
-                          onChange={(e) => {
-                            setSelectedMaterialIds((prev) =>
-                              e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id)
-                            );
-                          }}
-                        />
                         <span className="material-emoji">{sourceEmoji}</span>
                         <Typography.Text strong>{parsed.fileName}</Typography.Text>
                         <Tag color={materialStatus.color}>{materialStatus.label}</Tag>
@@ -2872,11 +2908,12 @@ export default function AppLearning() {
                               ttsCtrlRef.current?.setRate(v);
                             }}
                             options={[
-                              { label: '0.6× 慢', value: 0.6 },
+                              { label: '0.5×', value: 0.5 },
                               { label: '0.75×', value: 0.75 },
-                              { label: '0.85× 推荐', value: 0.85 },
-                              { label: '1.0× 标准', value: 1.0 },
-                              { label: '1.15× 快', value: 1.15 },
+                              { label: '1×', value: 1 },
+                              { label: '1.25×', value: 1.25 },
+                              { label: '1.5×', value: 1.5 },
+                              { label: '2×', value: 2 },
                             ]}
                           />
                         </Space>
