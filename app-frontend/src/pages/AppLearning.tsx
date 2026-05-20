@@ -1383,13 +1383,41 @@ export default function AppLearning() {
     }
 
     // ---- 分镜：按句拆分场景 ----
-    const rawScenes = content
+    // 1) 先按换行 / 中文句末标点 / 中文逗号 / 顿号 / 2+ 空白 分句
+    let pieces = content
       .replace(/\r/g, '')
-      .split(/[\n。！？!?；;]+/)
+      .split(/[\n。！？!?；;，,、]+|\s{2,}/);
+    // 2) 数学/口诀类（含 2 个以上 "X=Y" 表达式）按空白二次切分，让每条算式一幕
+    pieces = pieces.flatMap((p) => {
+      const s = p.trim();
+      if (!s) return [];
+      const eqMatches = s.match(/\S+[=＝]\S+/g);
+      if (eqMatches && eqMatches.length >= 2) {
+        return s.split(/\s+/).filter((x) => x.length > 0);
+      }
+      return [s];
+    });
+    // 3) 单幕仍过长（> 28 字符）的，按长度切成 22 字符的小段
+    pieces = pieces.flatMap((p) => {
+      if (p.length <= 28) return [p];
+      const chunks: string[] = [];
+      for (let i = 0; i < p.length; i += 22) chunks.push(p.slice(i, i + 22));
+      return chunks;
+    });
+    const rawScenes = pieces
       .map((s) => s.trim())
       .filter((s) => s.length > 0)
       .slice(0, 14);
-    const scenes = rawScenes.length > 0 ? rawScenes : [content.slice(0, 80)];
+    // 4) 全部空兜底：直接按长度切
+    const scenes = rawScenes.length > 0
+      ? rawScenes
+      : (() => {
+          const t = content.replace(/\s+/g, ' ').trim();
+          if (!t) return ['小朋友，一起来学习吧'];
+          const out: string[] = [];
+          for (let i = 0; i < Math.min(t.length, 14 * 22); i += 22) out.push(t.slice(i, i + 22));
+          return out;
+        })();
     const rawDurations = scenes.map((s) => Math.max(2400, Math.min(6800, s.length * 220)));
     const rawTotal = rawDurations.reduce((a, b) => a + b, 0);
     const targetTotal = Math.min(58000, Math.max(9000, rawTotal));
