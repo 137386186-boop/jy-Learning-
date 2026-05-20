@@ -2,9 +2,29 @@
 // 通过 WebSocket 与 speech.platform.bing.com 通信，返回 mp3 二进制。
 // 没有官方 API 密钥要求，但请控制频率，避免被限流。
 import WebSocket from 'ws';
+import { createHash } from 'crypto';
 
-const ENDPOINT =
-  'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4';
+const TRUSTED_CLIENT_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
+// 微软在 2024 年开始要求 Sec-MS-GEC 时间签名；不带就 403。
+// 算法：Windows 文件时间 ticks = (unix秒 + 11644473600) * 1e7，按 5 分钟向下取整后与 token 拼接做 SHA-256 大写。
+const WIN_EPOCH = 11644473600n;
+const FIVE_MIN_TICKS = 3_000_000_000n; // 5 min * 60 s * 1e7 ticks/s
+const SEC_MS_GEC_VERSION = '1-130.0.2849.68';
+
+function generateSecMsGec(): string {
+  const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+  const ticks = (nowSeconds + WIN_EPOCH) * 10_000_000n;
+  const rounded = ticks - (ticks % FIVE_MIN_TICKS);
+  return createHash('sha256')
+    .update(`${rounded.toString()}${TRUSTED_CLIENT_TOKEN}`)
+    .digest('hex')
+    .toUpperCase();
+}
+
+function buildEndpoint(connectionId: string): string {
+  const secMsGec = generateSecMsGec();
+  return `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${secMsGec}&Sec-MS-GEC-Version=${encodeURIComponent(SEC_MS_GEC_VERSION)}&ConnectionId=${connectionId}`;
+}
 
 export interface EdgeTtsOptions {
   voice?: string; // e.g. zh-CN-YunxiNeural
@@ -51,11 +71,15 @@ export async function synthesizeEdgeTts(
 
   return new Promise<Buffer>((resolve, reject) => {
     const reqId = uuid().replace(/-/g, '').toUpperCase();
-    const ws = new WebSocket(ENDPOINT, {
+    const ws = new WebSocket(buildEndpoint(reqId), {
       headers: {
+        'Pragma': 'no-cache',
+        'Cache-Control': 'no-cache',
         Origin: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'en-US,en;q=0.9',
         'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
       },
     });
 
