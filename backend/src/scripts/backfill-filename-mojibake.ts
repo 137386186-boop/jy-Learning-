@@ -1,6 +1,6 @@
 import path from 'path';
 import dotenv from 'dotenv';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -13,6 +13,20 @@ function fixFilename(name: string): string | null {
     const latinBuf = Buffer.from(name, 'latin1');
     const decoded = latinBuf.toString('utf8');
     if (Buffer.from(decoded, 'utf8').equals(latinBuf) && decoded !== name) {
+      return decoded;
+    }
+  } catch {}
+  return null;
+}
+
+const MOJIBAKE_HINT = /[ÃÂÐÑØæçðñþäåèéêëìíîïòóôõöùúûüÿ¥»]/;
+
+function fixMojibakeText(text: string): string | null {
+  if (!text || !MOJIBAKE_HINT.test(text)) return null;
+  try {
+    const latinBuf = Buffer.from(text, 'latin1');
+    const decoded = latinBuf.toString('utf8');
+    if (Buffer.from(decoded, 'utf8').equals(latinBuf) && decoded !== text && !MOJIBAKE_HINT.test(decoded)) {
       return decoded;
     }
   } catch {}
@@ -37,20 +51,36 @@ async function main() {
     scanned++;
     const content = (row.content || {}) as Record<string, unknown>;
     const original = typeof content.fileName === 'string' ? content.fileName : '';
-    if (!original) continue;
+    const recognition = (content.recognitionResult && typeof content.recognitionResult === 'object')
+      ? (content.recognitionResult as Record<string, unknown>)
+      : null;
+    const extractedText = recognition && typeof recognition.extractedText === 'string'
+      ? recognition.extractedText
+      : '';
 
-    const fixed = fixFilename(original);
-    if (!fixed) continue;
+    const fixedName = original ? fixFilename(original) : null;
+    const fixedText = extractedText ? fixMojibakeText(extractedText) : null;
+
+    if (!fixedName && !fixedText) continue;
 
     needsFix++;
     if (samples.length < 10) {
-      samples.push({ id: row.id, from: original, to: fixed });
+      samples.push({
+        id: row.id,
+        from: fixedName ? original : `[text]${extractedText.slice(0, 30)}`,
+        to: fixedName || `[text]${(fixedText || '').slice(0, 30)}`,
+      });
     }
 
     if (apply) {
+      const nextContent: Record<string, unknown> = { ...content };
+      if (fixedName) nextContent.fileName = fixedName;
+      if (fixedText && recognition) {
+        nextContent.recognitionResult = { ...recognition, extractedText: fixedText };
+      }
       await prisma.appArtifact.update({
         where: { id: row.id },
-        data: { content: { ...content, fileName: fixed } },
+        data: { content: nextContent as Prisma.InputJsonValue },
       });
       updated++;
     }

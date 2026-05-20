@@ -64,6 +64,15 @@ const ttsLimiter = rateLimit({
   message: { error: 'tts_rate_limited' },
 });
 
+// 长文本朗读：单次请求可能内部分多段调用 Edge TTS，限频放宽，避免连读长篇时触发
+const ttsLongLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'tts_rate_limited' },
+});
+
 function getParent(req: Request): AppParentTokenPayload | null {
   return (req as Request & { appParent?: AppParentTokenPayload }).appParent || null;
 }
@@ -1506,6 +1515,80 @@ router.post('/tts', requireAppParent, ttsLimiter, async (req: Request, res: Resp
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Cache-Control', 'no-store');
     res.send(buf);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'tts_failed';
+    res.status(502).json({ error: msg });
+  }
+});
+
+// 长文本朗读：服务端按句号切成 ≤2000 字的块顺序合成，再把 mp3 帧拼接成一条音频返回。
+// 这样前端可以用单个 <audio> 元素连续播放，避免 Web Speech API 在手机 Chrome 上 15s 截断造成的"断断续续"。
+router.post('/tts/long', requireAppParent, ttsLongLimiter, async (req: Request, res: Response) => {
+  try {
+    const payload = getParent(req);
+    if (!payload) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const text = String(body.text || '').trim();
+    if (!text) {
+      res.status(400).json({ error: 'tts_empty_text' });
+      return;
+    }
+    if (text.length > 8000) {
+      res.status(400).json({ error: 'tts_text_too_long' });
+      return;
+    }
+    const voice = typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : 'zh-CN-YunxiNeural';
+    const rate = typeof body.rate === 'string' && body.rate.trim() ? body.rate.trim() : '-4%';
+
+    const CHUNK_MAX = 2000;
+    const chunks: string[] = [];
+    const sentences = text.replace(/\r/g, '').split(/(?<=[。！？!?\n])/);
+    let buf = '';
+    for (const s of sentences) {
+      const seg = s.trim();
+      if (!seg) continue;
+      if (seg.length > CHUNK_MAX) {
+        if (buf) { chunks.push(buf); buf = ''; }
+        const subs = seg.split(/(?<=[，、,；;])/);
+        let sb = '';
+        for (const sub of subs) {
+          if ((sb + sub).length > CHUNK_MAX) {
+            if (sb) chunks.push(sb);
+            if (sub.length > CHUNK_MAX) {
+              for (let i = 0; i < sub.length; i += CHUNK_MAX) chunks.push(sub.slice(i, i + CHUNK_MAX));
+              sb = '';
+            } else {
+              sb = sub;
+            }
+          } else {
+            sb += sub;
+          }
+        }
+        if (sb) chunks.push(sb);
+      } else if ((buf + seg).length > CHUNK_MAX) {
+        chunks.push(buf);
+        buf = seg;
+      } else {
+        buf += seg;
+      }
+    }
+    if (buf) chunks.push(buf);
+    if (!chunks.length) { res.status(400).json({ error: 'tts_empty_text' }); return; }
+
+    const parts: Buffer[] = [];
+    for (const chunk of chunks) {
+      const part = await synthesizeEdgeTts(chunk, { voice, rate });
+      parts.push(part);
+    }
+    const merged = Buffer.concat(parts);
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Tts-Chunks', String(chunks.length));
+    res.send(merged);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'tts_failed';
     res.status(502).json({ error: msg });

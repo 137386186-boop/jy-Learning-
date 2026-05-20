@@ -45,6 +45,20 @@ function resolveAssetUrl(rawUrl: string) {
   return `${APP_API_BASE.replace('/api/app', '')}${value.startsWith('/') ? '' : '/'}${value}`;
 }
 
+const MOJIBAKE_HINT = /[ÃÂÐÑØæçðñþäåèéêëìíîïòóôõöùúûüÿ¥»¢£¤¦§¨©ª«¬®¯°±²³´µ¶·¸¹º¼½¾¿]/;
+
+function rescueMojibake(input: string): string {
+  if (!input) return input;
+  if (typeof TextDecoder === 'undefined') return input;
+  if (!MOJIBAKE_HINT.test(input)) return input;
+
+  const bytes = new Uint8Array(Array.from(input).map((char) => char.charCodeAt(0) & 0xff));
+  const utf8Decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  if (!utf8Decoded) return input;
+
+  return MOJIBAKE_HINT.test(utf8Decoded) ? input : utf8Decoded;
+}
+
 function decodeFileName(raw: unknown) {
   const value = String(raw || '').trim();
   if (!value) return '未命名资料';
@@ -57,14 +71,7 @@ function decodeFileName(raw: unknown) {
     decodedUri = value;
   }
 
-  if (typeof TextDecoder === 'undefined') return decodedUri;
-
-  const bytes = new Uint8Array(Array.from(decodedUri).map((char) => char.charCodeAt(0) & 0xff));
-  const utf8Decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes).trim();
-  if (!utf8Decoded) return decodedUri;
-
-  const mojibakeHint = /[ÃÂÐÑØæçðñþ]/;
-  return mojibakeHint.test(decodedUri) && !mojibakeHint.test(utf8Decoded) ? utf8Decoded : decodedUri;
+  return rescueMojibake(decodedUri);
 }
 
 function parseMaterialContent(raw: unknown) {
@@ -85,7 +92,7 @@ function parseMaterialContent(raw: unknown) {
     fallbackReason: String(data.fallbackReason || ''),
     costUsd: Number(data.costUsd || 0),
     fileUrl: String(data.fileUrl || ''),
-    recognitionText: recognition ? String(recognition.extractedText || '') : '',
+    recognitionText: recognition ? rescueMojibake(String(recognition.extractedText || '')) : '',
     recognitionCategory: recognition ? String(recognition.suggestedCategory || '') : '',
     recognitionProvider: recognition ? String(recognition.provider || '') : '',
     audioUrl: audioOutput && typeof (audioOutput as Record<string, unknown>).url === 'string'
@@ -275,7 +282,6 @@ export default function AppLearning() {
   const [deletingMaterialId, setDeletingMaterialId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
-  const [createMode, setCreateMode] = useState<'upload' | 'paste'>('upload');
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrStage, setOcrStage] = useState<string>('');
   const [ocrPercent, setOcrPercent] = useState(0);
@@ -767,6 +773,23 @@ export default function AppLearning() {
     setUploading(true);
     setUploadPercent(0);
     setUploadStage('📤 正在上传文件…');
+    let stageTimer: number | null = null;
+    const stopPhaseTimer = () => {
+      if (stageTimer !== null) { window.clearInterval(stageTimer); stageTimer = null; }
+    };
+    const startPhaseTimer = (basePercent: number, capPercent: number, prefix: string) => {
+      stopPhaseTimer();
+      const startedAt = Date.now();
+      setUploadPercent(basePercent);
+      setUploadStage(`${prefix}（已用 0s）`);
+      stageTimer = window.setInterval(() => {
+        const sec = Math.floor((Date.now() - startedAt) / 1000);
+        const span = capPercent - basePercent;
+        const grow = Math.min(span, Math.round(span * (1 - Math.exp(-sec / 25))));
+        setUploadPercent(basePercent + grow);
+        setUploadStage(`${prefix}（已用 ${sec}s）`);
+      }, 1000);
+    };
     try {
       const formData = new FormData();
       formData.append('file', fileToUpload);
@@ -797,25 +820,28 @@ export default function AppLearning() {
         return;
       }
 
-      setUploadPercent(100);
       const uploaded = uploadRes.data && typeof uploadRes.data === 'object' ? (uploadRes.data as Record<string, unknown>) : null;
       const uploadedMaterialId = uploaded && typeof uploaded.id === 'string' ? uploaded.id : null;
+      // 自动后续流程时，上传完成只占进度条 35%；纯上传场景一次性给 100%
+      setUploadPercent(autoGenerateTask && uploadedMaterialId ? 35 : 100);
 
       if (autoGenerateTask && uploadedMaterialId) {
-        setUploadStage('🔍 AI 正在阅读资料内容…');
+        startPhaseTimer(40, 60, '🔍 AI 正在阅读资料内容…');
         const recognizeRes = await appFetch(`${APP_API_BASE}/library/materials/${uploadedMaterialId}/recognize`, {
           method: 'POST',
         });
         const recognizeData = await parseApiResponse(recognizeRes);
         if (!recognizeRes.ok) {
+          stopPhaseTimer();
           message.error(getApiErrorMessage(recognizeData, '上传成功，但自动识别失败', recognizeRes.status));
           await reloadAll();
           return;
         }
 
         await pollMaterialUntilDone(uploadedMaterialId, 'recognize');
+        stopPhaseTimer();
 
-        setUploadStage('🎬 AI 正在生成音视频…');
+        startPhaseTimer(65, 95, '🎬 AI 正在生成音视频…');
         const generateRes = await appFetch(`${APP_API_BASE}/library/materials/${uploadedMaterialId}/generate-task`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -823,12 +849,15 @@ export default function AppLearning() {
         });
         const generateData = await parseApiResponse(generateRes);
         if (!generateRes.ok) {
+          stopPhaseTimer();
           message.error(getApiErrorMessage(generateData, '上传成功，但自动生成任务失败', generateRes.status));
           await reloadAll();
           return;
         }
 
         await pollMaterialUntilDone(uploadedMaterialId, 'generate');
+        stopPhaseTimer();
+        setUploadPercent(100);
         setUploadStage('🎉 生成完成！');
         message.success('上传成功，已自动识别并生成');
         if (uploadedMaterialId) {
@@ -853,6 +882,7 @@ export default function AppLearning() {
         await reloadAll();
       }
     } finally {
+      stopPhaseTimer();
       uploadAbortRef.current = null;
       setUploading(false);
       window.setTimeout(() => {
@@ -1130,44 +1160,16 @@ export default function AppLearning() {
       message.warning('请先完成识别，拿到文本后再生成音频');
       return;
     }
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      message.error('当前浏览器不支持语音播放');
-      return;
-    }
 
-    // 先停掉上一轮朗读（如果有），并标记其 stopped，避免遗留回调把新一轮打断
+    // 先停掉上一轮朗读
     const prevCancel = (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel;
     if (typeof prevCancel === 'function') {
       try { prevCancel(); } catch { /* ignore */ }
     }
-    window.speechSynthesis.cancel();
     ttsCtrlRef.current = null;
     setTtsState(null);
 
-    // 预热 voices：Chrome 首次冷启动若 voices 未就绪，speak 会静默失败
-    const ensureVoicesReady = async () => {
-      const list = window.speechSynthesis.getVoices();
-      if (list && list.length) return;
-      await new Promise<void>((resolve) => {
-        const start = Date.now();
-        const timer = window.setInterval(() => {
-          if (window.speechSynthesis.getVoices().length || Date.now() - start > 1500) {
-            window.clearInterval(timer);
-            resolve();
-          }
-        }, 100);
-      });
-    };
-    await ensureVoicesReady();
-
-    // 选一个中文 voice（如无则让浏览器自行选）
-    const voices = window.speechSynthesis.getVoices();
-    const zhVoice =
-      voices.find((v) => /zh(-|_)?CN/i.test(v.lang)) ||
-      voices.find((v) => /^zh/i.test(v.lang)) ||
-      null;
-
-    // 分段：先按句号/问号/分号/换行切，再把长句限制在 60 字内（控制单段时长 < 12s，远低于 Chrome 15s 截断阈值）
+    // 分段：仅用于进度条 / 跳转滑块，真正的音频是一段完整 mp3
     const SEGMENT_MAX = 60;
     const segments = content
       .replace(/\r/g, '')
@@ -1177,13 +1179,11 @@ export default function AppLearning() {
       .flatMap((s) => {
         if (s.length <= SEGMENT_MAX) return [s];
         const parts: string[] = [];
-        // 优先在逗号/顿号切
         const subs = s.split(/(?<=[，、,])/);
         let buf = '';
         for (const sub of subs) {
           if ((buf + sub).length > SEGMENT_MAX) {
             if (buf) parts.push(buf);
-            // 单子句仍过长则硬切
             if (sub.length > SEGMENT_MAX) {
               for (let i = 0; i < sub.length; i += SEGMENT_MAX) parts.push(sub.slice(i, i + SEGMENT_MAX));
               buf = '';
@@ -1197,10 +1197,7 @@ export default function AppLearning() {
         if (buf) parts.push(buf);
         return parts;
       });
-
     if (!segments.length) segments.push(content);
-
-    // 计算每段起始字符偏移，用于进度条 tooltip
     const charsBefore: number[] = [];
     {
       let acc = 0;
@@ -1211,154 +1208,142 @@ export default function AppLearning() {
     }
     const totalChars = content.length;
 
-    message.loading({ content: `🔊 正在朗读，全文约 ${totalChars} 字（共 ${segments.length} 段）…`, key: `speak-${materialId}` });
+    const key = `speak-${materialId}`;
+    message.loading({ content: `🔊 正在合成语音，全文约 ${totalChars} 字…`, key, duration: 0 });
 
-    let idx = 0;
     let stopped = false;
-    let paused = false;
-    let advanced = false;
-    let watchdog: number | null = null;
-    let runSeq = 0;
+    let audio: HTMLAudioElement | null = null;
+    let audioUrl = '';
 
-    const clearWatchdog = () => {
-      if (watchdog !== null) {
-        window.clearTimeout(watchdog);
-        watchdog = null;
-      }
-    };
-
-    const publishState = () => {
-      if (stopped) return;
-      setTtsState({
-        materialId,
-        segmentIdx: Math.min(idx, segments.length - 1),
-        totalSegments: segments.length,
-        totalChars,
-        charsBefore,
-        isPaused: paused,
-      });
-    };
-
-    const advance = (delayMs: number) => {
-      if (advanced) return;
-      advanced = true;
-      clearWatchdog();
-      idx += 1;
-      window.setTimeout(speakNext, delayMs);
-    };
-
-    function speakNext() {
-      if (stopped) return;
-      if (paused) return;
-      if (idx >= segments.length) {
-        message.success({ content: `✅ 朗读完成（共 ${segments.length} 段）`, key: `speak-${materialId}` });
-        setTtsState(null);
-        ttsCtrlRef.current = null;
-        return;
-      }
-      advanced = false;
-      const mySeq = ++runSeq;
-      const segText = segments[idx];
-      const u = new SpeechSynthesisUtterance(segText);
-      u.lang = 'zh-CN';
-      if (zhVoice) u.voice = zhVoice;
-      u.rate = ttsRateRef.current;
-      u.pitch = 1;
-      u.onend = () => {
-        if (mySeq !== runSeq) return;
-        advance(80);
-      };
-      u.onerror = (e) => {
-        if (mySeq !== runSeq) return;
-        // 关键 fix：interrupted / canceled 不再视作"用户停止"。
-        // 用户停止走显式 __jyLastTtsCancel → stopped=true 路径；其余一律继续下一段。
-        if (stopped || paused) return;
-        // 留点时间让引擎复位，避免连环 interrupted
-        advance(e?.error === 'interrupted' || e?.error === 'canceled' ? 300 : 200);
-      };
-
-      // Watchdog：单段最多给 30s，超过则强制推进，防止 onend/onerror 都不来卡死
-      const estimatedMs = Math.max(8000, segText.length * 220);
-      watchdog = window.setTimeout(() => {
-        if (stopped || paused) return;
-        if (mySeq !== runSeq) return;
-        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
-        advance(200);
-      }, Math.min(estimatedMs + 5000, 30000));
-
-      publishState();
-      try {
-        window.speechSynthesis.speak(u);
-      } catch {
-        advance(200);
-      }
-    }
-
-    const ctrl: TtsCtrl = {
-      pause: () => {
-        if (stopped || paused) return;
-        paused = true;
-        runSeq += 1; // 让当前段的 onend/onerror 失效
-        clearWatchdog();
-        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
-        publishState();
-      },
-      resume: () => {
-        if (stopped || !paused) return;
-        paused = false;
-        publishState();
-        speakNext();
-      },
-      stop: () => {
-        stopped = true;
-        paused = false;
-        runSeq += 1;
-        clearWatchdog();
-        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
-        message.destroy(`speak-${materialId}`);
-        setTtsState(null);
-        ttsCtrlRef.current = null;
-      },
-      seekToSegment: (target: number) => {
-        if (stopped) return;
-        const next = Math.max(0, Math.min(segments.length - 1, Math.floor(target)));
-        runSeq += 1;
-        clearWatchdog();
-        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
-        idx = next;
-        advanced = false;
-        if (paused) {
-          publishState();
-        } else {
-          window.setTimeout(speakNext, 100);
-        }
-      },
-      setRate: (rate: number) => {
-        const clamped = Math.max(0.5, Math.min(2.0, rate));
-        ttsRateRef.current = clamped;
-        if (stopped || paused) return;
-        // 重新从当前段以新速率开始
-        runSeq += 1;
-        clearWatchdog();
-        try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
-        advanced = false;
-        window.setTimeout(speakNext, 100);
-      },
-    };
-    ttsCtrlRef.current = ctrl;
-
-    publishState();
-    speakNext();
-
-    (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel = () => {
+    const cleanup = (silent: boolean) => {
       stopped = true;
-      paused = false;
-      runSeq += 1;
-      clearWatchdog();
-      try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
+      if (audio) {
+        try { audio.pause(); } catch { /* ignore */ }
+        audio.onended = null;
+        audio.onerror = null;
+        audio.ontimeupdate = null;
+        audio.onpause = null;
+        audio.onplay = null;
+        audio.onloadedmetadata = null;
+        try { audio.src = ''; audio.load(); } catch { /* ignore */ }
+        audio = null;
+      }
+      if (audioUrl) {
+        try { URL.revokeObjectURL(audioUrl); } catch { /* ignore */ }
+        audioUrl = '';
+      }
+      if (!silent) message.destroy(key);
       setTtsState(null);
       ttsCtrlRef.current = null;
     };
+
+    try {
+      const resp = await appFetch(`${APP_API_BASE}/tts/long`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: content, rate: '-4%' }),
+      });
+      if (stopped) return;
+      if (!resp.ok) {
+        let errCode = '';
+        try { const j = await resp.json(); errCode = String(j?.error || ''); } catch { /* ignore */ }
+        message.destroy(key);
+        if (errCode === 'tts_rate_limited') message.error('朗读请求过于频繁，请稍后再试');
+        else if (errCode === 'tts_text_too_long') message.error('文本过长，无法朗读（最多 8000 字）');
+        else message.error('朗读失败：' + (errCode || `HTTP ${resp.status}`));
+        cleanup(true);
+        return;
+      }
+      const blob = await resp.blob();
+      if (stopped) return;
+      audioUrl = URL.createObjectURL(blob);
+      audio = new Audio(audioUrl);
+      audio.preload = 'auto';
+      audio.playbackRate = ttsRateRef.current;
+
+      const computeSegmentIdx = (cur: number, dur: number): number => {
+        if (!dur || Number.isNaN(dur) || dur <= 0) return 0;
+        const ratio = Math.min(1, Math.max(0, cur / dur));
+        const charsPlayed = Math.floor(ratio * totalChars);
+        for (let i = segments.length - 1; i >= 0; i--) {
+          if (charsPlayed >= charsBefore[i]) return i;
+        }
+        return 0;
+      };
+
+      const publishState = () => {
+        if (stopped || !audio) return;
+        const dur = audio.duration;
+        const cur = audio.currentTime;
+        setTtsState({
+          materialId,
+          segmentIdx: computeSegmentIdx(cur, dur),
+          totalSegments: segments.length,
+          totalChars,
+          charsBefore,
+          isPaused: audio.paused,
+        });
+      };
+
+      audio.onloadedmetadata = publishState;
+      audio.ontimeupdate = publishState;
+      audio.onplay = publishState;
+      audio.onpause = publishState;
+      audio.onended = () => {
+        message.success({ content: '✅ 朗读完成', key });
+        cleanup(true);
+      };
+      audio.onerror = () => {
+        message.error({ content: '朗读播放失败', key });
+        cleanup(true);
+      };
+
+      const ctrl: TtsCtrl = {
+        pause: () => { try { audio?.pause(); } catch { /* ignore */ } },
+        resume: () => { try { audio?.play().catch(() => {}); } catch { /* ignore */ } },
+        stop: () => { cleanup(false); },
+        seekToSegment: (target: number) => {
+          if (!audio) return;
+          const idx = Math.max(0, Math.min(segments.length - 1, Math.floor(target)));
+          const dur = audio.duration;
+          if (!dur || Number.isNaN(dur) || dur <= 0) return;
+          const charRatio = charsBefore[idx] / Math.max(1, totalChars);
+          try { audio.currentTime = Math.min(dur - 0.05, Math.max(0, charRatio * dur)); } catch { /* ignore */ }
+          if (audio.paused) { try { audio.play().catch(() => {}); } catch { /* ignore */ } }
+        },
+        setRate: (rate: number) => {
+          const clamped = Math.max(0.5, Math.min(2.0, rate));
+          ttsRateRef.current = clamped;
+          if (audio) audio.playbackRate = clamped;
+        },
+      };
+      ttsCtrlRef.current = ctrl;
+
+      message.destroy(key);
+      setTtsState({
+        materialId,
+        segmentIdx: 0,
+        totalSegments: segments.length,
+        totalChars,
+        charsBefore,
+        isPaused: false,
+      });
+      try {
+        await audio.play();
+      } catch (err) {
+        message.error('朗读启动失败：' + (err instanceof Error ? err.message : String(err)));
+        cleanup(true);
+        return;
+      }
+
+      (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel = () => {
+        cleanup(true);
+      };
+    } catch (err) {
+      message.destroy(key);
+      message.error('朗读失败：' + (err instanceof Error ? err.message : String(err)));
+      cleanup(true);
+    }
   };
 
   const onGenerateMaterialVideo = async (
@@ -1572,6 +1557,55 @@ export default function AppLearning() {
         if (event.data.size > 0) chunks.push(event.data);
       };
 
+      // 关键词 → 道具 emoji 映射（用于让漂浮道具贴合当前场景文本）
+      const keywordEmoji: Array<[string, string]> = [
+        ['苹果', '🍎'], ['橘子', '🍊'], ['橙', '🍊'], ['香蕉', '🍌'], ['葡萄', '🍇'],
+        ['西瓜', '🍉'], ['草莓', '🍓'], ['梨', '🍐'], ['桃', '🍑'], ['菠萝', '🍍'],
+        ['太阳', '☀️'], ['月亮', '🌙'], ['月', '🌙'], ['星星', '⭐'], ['星', '⭐'],
+        ['云', '☁️'], ['雨', '🌧'], ['雪', '❄️'], ['冰', '🧊'], ['火', '🔥'],
+        ['雷', '⚡'], ['电', '⚡'], ['风', '💨'], ['彩虹', '🌈'],
+        ['花', '🌸'], ['草', '🌿'], ['树', '🌳'], ['叶', '🍃'], ['玫瑰', '🌹'],
+        ['鸟', '🐦'], ['鱼', '🐟'], ['猫', '🐱'], ['狗', '🐶'], ['鸡', '🐔'],
+        ['鸭', '🦆'], ['兔', '🐰'], ['熊', '🐻'], ['虎', '🐯'], ['狮', '🦁'],
+        ['马', '🐴'], ['牛', '🐮'], ['羊', '🐑'], ['猪', '🐷'], ['蛇', '🐍'],
+        ['蝴蝶', '🦋'], ['蜜蜂', '🐝'], ['蚂蚁', '🐜'], ['青蛙', '🐸'],
+        ['书', '📚'], ['本', '📖'], ['笔', '✏️'], ['画', '🎨'], ['音乐', '🎵'],
+        ['歌', '🎶'], ['琴', '🎹'], ['鼓', '🥁'],
+        ['加', '➕'], ['减', '➖'], ['乘', '✖️'], ['除', '➗'], ['等于', '🟰'],
+        ['数', '🔢'],
+        ['车', '🚗'], ['船', '⛵'], ['飞机', '✈️'], ['火箭', '🚀'], ['自行车', '🚲'],
+        ['球', '⚽'], ['气球', '🎈'], ['礼物', '🎁'], ['蛋糕', '🍰'], ['糖', '🍬'],
+        ['爱', '❤️'], ['心', '💖'], ['家', '🏠'], ['学校', '🏫'],
+        ['水', '💧'], ['山', '⛰'], ['河', '🌊'], ['海', '🌊'],
+      ];
+      const scenePropsArr: string[][] = scenes.map((s) => {
+        const text = String(s || '');
+        const matched: string[] = [];
+        for (const [kw, em] of keywordEmoji) {
+          if (text.includes(kw) && !matched.includes(em)) matched.push(em);
+          if (matched.length >= 6) break;
+        }
+        return matched;
+      });
+
+      // 场景类型识别：根据文字命中关键词归类，未命中则 normal
+      type SceneFx = { kind: 'count' | 'sound' | 'visual' | 'normal'; digits: string[] };
+      const countKws = ['数一数', '数数', '几个', '多少', '加', '减', '乘', '除', '一共', '总共'];
+      const soundKws = ['听', '音乐', '唱', '歌', '声', '朗读', '念', '读一读'];
+      const visualKws = ['看', '画', '颜色', '形状', '圆', '方形', '三角'];
+      const sceneFxArr: SceneFx[] = scenes.map((s) => {
+        const text = String(s || '');
+        const digits: string[] = [];
+        const dm = text.match(/\d+/g);
+        if (dm) digits.push(...dm.slice(0, 6));
+        if (countKws.some((k) => text.includes(k)) || digits.length >= 2) {
+          return { kind: 'count', digits };
+        }
+        if (soundKws.some((k) => text.includes(k))) return { kind: 'sound', digits };
+        if (visualKws.some((k) => text.includes(k))) return { kind: 'visual', digits };
+        return { kind: 'normal', digits };
+      });
+
       const startedAt = Date.now();
       let raf = 0;
 
@@ -1647,10 +1681,13 @@ export default function AppLearning() {
         }
 
         // 2. 漂浮道具（云朵 + 道具 emoji）
+        // 优先用当前场景文字匹配到的关键词道具；没匹配到则回退到通用 propPool
+        const matchedProps = scenePropsArr[sceneIdx] || [];
+        const propsForScene = matchedProps.length > 0 ? matchedProps : propPool;
         ctx.font = `${isPortrait ? 28 : 34}px sans-serif`;
         ctx.globalAlpha = 0.85;
         for (let i = 0; i < 10; i += 1) {
-          const e = propPool[(i + sceneIdx * 3) % propPool.length];
+          const e = propsForScene[(i + sceneIdx * 3) % propsForScene.length];
           const baseX = ((i * 157) % (canvas.width - 80)) + 40;
           const baseY = ((i * 197) % (groundY - 200)) + 130;
           const px = baseX + Math.sin(t * 0.6 + i * 0.9) * 22;
@@ -1699,21 +1736,47 @@ export default function AppLearning() {
         const charBX = isPortrait ? canvas.width * 0.74 : canvas.width * 0.78;
         const speakerIsA = sceneIdx % 2 === 0;
         const drawChar = (emoji: string, x: number, isSpeaker: boolean, flip: boolean) => {
-          const breathe = Math.sin(t * 2.2 + (isSpeaker ? 0 : Math.PI)) * (isSpeaker ? 8 : 4);
+          // 呼吸（非说话者主要靠这个起伏）
+          const breathe = Math.sin(t * 2.2 + (isSpeaker ? 0 : Math.PI)) * (isSpeaker ? 3 : 4);
+          // 蹦跳：说话者用 |sin|^1.7 形成跳起-落地节奏（仅向上偏移）
+          const bouncePhase = t * 2.4;
+          const bounce = isSpeaker ? -Math.pow(Math.abs(Math.sin(bouncePhase)), 1.7) * 26 : 0;
           // 张口：仅说话的角色嘴部张合（垂直缩放）
           const speakMouth = isSpeaker ? 1 + Math.abs(Math.sin(t * 11)) * 0.08 : 1;
-          // 轻微左右晃动（说话者更明显）
+          // 眨眼：周期性短促垂直 squash，两个角色相位错开
+          const blinkPeriod = 3.4;
+          const blinkOffset = isSpeaker ? 0 : 1.5;
+          const blinkCycle = ((t + blinkOffset) % blinkPeriod) / blinkPeriod;
+          const blinkActive = blinkCycle > 0.94;
+          const blinkScaleY = blinkActive
+            ? 1 - Math.sin(((blinkCycle - 0.94) / 0.06) * Math.PI) * 0.2
+            : 1;
+          // 摇晃
           const sway = Math.sin(t * 1.8 + (isSpeaker ? 0 : Math.PI / 2)) * (isSpeaker ? 8 : 3);
-          // 影子
-          ctx.fillStyle = 'rgba(0,0,0,0.18)';
+          // 非说话者点头
+          const nodAngle = !isSpeaker ? Math.sin(t * 3.2) * 0.07 : 0;
+
+          // 影子：蹦跳时按高度缩小、变淡
+          const heightRatio = isSpeaker ? Math.abs(bounce) / 26 : 0;
+          const shadowK = 1 - heightRatio * 0.35;
+          ctx.fillStyle = `rgba(0,0,0,${0.22 - heightRatio * 0.08})`;
           ctx.beginPath();
-          ctx.ellipse(x, groundLine + charSize * 0.42, charSize * 0.34, charSize * 0.08, 0, 0, Math.PI * 2);
+          ctx.ellipse(
+            x,
+            groundLine + charSize * 0.42,
+            charSize * 0.34 * shadowK,
+            charSize * 0.08 * shadowK,
+            0,
+            0,
+            Math.PI * 2,
+          );
           ctx.fill();
 
           ctx.save();
-          ctx.translate(x + sway, groundLine + breathe);
+          ctx.translate(x + sway, groundLine + breathe + bounce);
+          if (nodAngle !== 0) ctx.rotate(nodAngle);
           if (flip) ctx.scale(-1, 1);
-          ctx.scale(1, speakMouth);
+          ctx.scale(1, speakMouth * blinkScaleY);
           ctx.font = `${charSize}px sans-serif`;
           ctx.textBaseline = 'middle';
           ctx.textAlign = 'center';
@@ -1722,23 +1785,64 @@ export default function AppLearning() {
           ctx.textBaseline = 'alphabetic';
           ctx.textAlign = 'start';
 
-          // 说话者头顶小音符
           if (isSpeaker) {
+            // 说话者头顶小音符
             ctx.globalAlpha = 0.7 + Math.sin(t * 4) * 0.3;
             ctx.font = `${isPortrait ? 28 : 34}px sans-serif`;
-            ctx.fillText('🎵', x + charSize * 0.35, groundLine + breathe - charSize * 0.55 + Math.sin(t * 3) * 4);
+            ctx.fillText(
+              '🎵',
+              x + charSize * 0.35,
+              groundLine + breathe + bounce - charSize * 0.55 + Math.sin(t * 3) * 4,
+            );
             ctx.globalAlpha = 1;
+          } else {
+            // 非说话者鼓掌：周期闪现 👏，让 listener 看起来在认真听
+            const clapCycle = (t * 1.6) % (Math.PI * 2);
+            const clapAlpha = Math.max(0, Math.sin(clapCycle));
+            if (clapAlpha > 0.15) {
+              ctx.globalAlpha = Math.min(1, clapAlpha * 1.1);
+              ctx.font = `${isPortrait ? 30 : 36}px sans-serif`;
+              const handX = x + (flip ? -1 : 1) * charSize * 0.34;
+              const handY = groundLine + breathe + charSize * 0.08 + Math.sin(t * 8) * 2;
+              ctx.fillText('👏', handX, handY);
+              ctx.globalAlpha = 1;
+            }
           }
         };
         drawChar(charA, charAX, speakerIsA, false);
         drawChar(charB, charBX, !speakerIsA, true);
+
+        // 5.1 主角道具：关键词命中时，让一个大 emoji 绕着说话者公转，强化"在讲这个"
+        if (matchedProps.length > 0) {
+          const heroEmoji = matchedProps[0];
+          const heroSpeakerX = speakerIsA ? charAX : charBX;
+          const orbitRadius = charSize * 0.55;
+          const orbitAngle = t * 1.4;
+          const heroX = heroSpeakerX + Math.cos(orbitAngle) * orbitRadius;
+          const heroY =
+            groundLine - charSize * 0.1 + Math.sin(orbitAngle) * orbitRadius * 0.45;
+          ctx.save();
+          ctx.translate(heroX, heroY);
+          ctx.rotate(Math.sin(t * 2.5) * 0.25);
+          ctx.font = `${isPortrait ? 72 : 88}px sans-serif`;
+          ctx.textBaseline = 'middle';
+          ctx.textAlign = 'center';
+          ctx.fillText(heroEmoji, 0, 0);
+          ctx.restore();
+          ctx.textBaseline = 'alphabetic';
+          ctx.textAlign = 'start';
+        }
 
         // 6. 对白气泡（指向当前说话者）
         const speakerX = speakerIsA ? charAX : charBX;
         const bubbleW = isPortrait ? canvas.width - 80 : canvas.width * 0.62;
         const bubbleH = isPortrait ? 240 : 220;
         const bubbleX = (canvas.width - bubbleW) / 2;
-        const bubbleY = isPortrait ? canvas.height * 0.18 : canvas.height * 0.2;
+        // 切场时气泡从下方滑入（前 18% 进度做缓动）
+        const bubbleSlideP = Math.min(1, sceneProgress / 0.18);
+        const bubbleSlideEase = 1 - Math.pow(1 - bubbleSlideP, 3);
+        const bubbleSlideOffset = (1 - bubbleSlideEase) * 36;
+        const bubbleY = (isPortrait ? canvas.height * 0.18 : canvas.height * 0.2) + bubbleSlideOffset;
 
         // 气泡阴影
         ctx.shadowColor = theme.soft;
@@ -1808,19 +1912,174 @@ export default function AppLearning() {
         // 7. 底部章节序号 + 提示
         ctx.fillStyle = theme.accent;
         ctx.font = `bold ${isPortrait ? 24 : 28}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-        ctx.fillText(`第 ${sceneIdx + 1} / ${scenes.length} 幕`, isPortrait ? 40 : 70, canvas.height - 36);
+        ctx.fillText(`第 ${sceneIdx + 1} / ${scenes.length} 幕`, isPortrait ? 40 : 70, canvas.height - 46);
 
         ctx.fillStyle = '#8c8c8c';
         ctx.font = `${isPortrait ? 18 : 22}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-        ctx.fillText('✨ AI 动画演绎 · 边看边学', canvas.width - (isPortrait ? 260 : 320), canvas.height - 36);
+        ctx.fillText('✨ AI 动画演绎 · 边看边学', canvas.width - (isPortrait ? 260 : 320), canvas.height - 46);
 
-        // 8. 场景过渡淡入淡出
-        if (sceneProgress < 0.07) {
-          ctx.fillStyle = `rgba(255,255,255,${1 - sceneProgress / 0.07})`;
+        // 7.1 字幕进度条（最底部）
+        const barH = isPortrait ? 8 : 10;
+        const barY = canvas.height - barH;
+        ctx.fillStyle = 'rgba(0,0,0,0.12)';
+        ctx.fillRect(0, barY, canvas.width, barH);
+        const progress = Math.min(1, elapsed / durationMs);
+        ctx.fillStyle = theme.accent;
+        ctx.fillRect(0, barY, canvas.width * progress, barH);
+        // 章节刻度
+        for (let i = 1; i < scenes.length; i += 1) {
+          const tx = canvas.width * (sceneStarts[i] / durationMs);
+          ctx.fillStyle = 'rgba(255,255,255,0.85)';
+          ctx.fillRect(tx - 1, barY, 2, barH);
+        }
+
+        // 7.5 场景类型特效层（count / sound / visual / normal）
+        const fx = sceneFxArr[sceneIdx];
+        if (fx && fx.kind !== 'normal') {
+          ctx.save();
+          if (fx.kind === 'count') {
+            // 数字飞入：每个数字从顶部带旋转下落，scene 前 60% 内全部就位
+            const digitsToShow = fx.digits.length > 0 ? fx.digits : ['1', '2', '3'];
+            ctx.font = `bold ${isPortrait ? 96 : 128}px "PingFang SC", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const slot = canvas.width / (digitsToShow.length + 1);
+            const targetY = canvas.height * 0.42;
+            for (let i = 0; i < digitsToShow.length; i += 1) {
+              const delay = i * 0.08;
+              const localP = Math.min(1, Math.max(0, (sceneProgress - delay) / 0.4));
+              if (localP <= 0) continue;
+              const ease = 1 - Math.pow(1 - localP, 3);
+              const x = slot * (i + 1);
+              const startY = -120;
+              const y = startY + (targetY - startY) * ease;
+              const rot = (1 - ease) * Math.PI * 1.2;
+              const bounce = localP < 0.95 ? 0 : Math.sin((localP - 0.95) * 20) * 8;
+              ctx.save();
+              ctx.translate(x, y - bounce);
+              ctx.rotate(rot);
+              ctx.fillStyle = theme.accent;
+              ctx.globalAlpha = 0.18;
+              ctx.fillText(digitsToShow[i], 4, 6);
+              ctx.globalAlpha = 0.92;
+              ctx.fillStyle = '#ffffff';
+              ctx.fillText(digitsToShow[i], 0, 0);
+              ctx.restore();
+            }
+            ctx.textAlign = 'start';
+            ctx.textBaseline = 'alphabetic';
+          } else if (fx.kind === 'sound') {
+            // 音符雨：🎵 / 🎶 从顶部落下，循环
+            const notes = ['🎵', '🎶', '🎼', '🎤'];
+            ctx.font = `${isPortrait ? 42 : 54}px sans-serif`;
+            ctx.textBaseline = 'middle';
+            for (let i = 0; i < 14; i += 1) {
+              const phase = (t * 0.35 + i * 0.31) % 1;
+              const x = ((i * 211) % (canvas.width - 60)) + 30;
+              const y = phase * (canvas.height + 80) - 40;
+              const sway = Math.sin(t * 1.4 + i) * 18;
+              ctx.globalAlpha = 0.35 + 0.45 * Math.sin(phase * Math.PI);
+              ctx.fillText(notes[i % notes.length], x + sway, y);
+            }
+            ctx.globalAlpha = 1;
+            ctx.textBaseline = 'alphabetic';
+          } else if (fx.kind === 'visual') {
+            // 闪光圈：scene 中心同心圆 pulse
+            const cx = canvas.width / 2;
+            const cy = canvas.height * 0.45;
+            for (let i = 0; i < 3; i += 1) {
+              const phase = (t * 0.8 + i * 0.33) % 1;
+              const radius = phase * (isPortrait ? 260 : 340);
+              ctx.beginPath();
+              ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+              ctx.strokeStyle = theme.accent;
+              ctx.globalAlpha = (1 - phase) * 0.45;
+              ctx.lineWidth = isPortrait ? 5 : 7;
+              ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1;
+          }
+          ctx.restore();
+        }
+
+        // 8. 场景过渡：进入时用本场景主题色淡入；退出时渐隐到下场景主题色（ease-out / ease-in，避免硬切白闪）
+        if (sceneProgress < 0.12) {
+          const fadeP = sceneProgress / 0.12;
+          const ease = 1 - Math.pow(1 - fadeP, 2);
+          ctx.globalAlpha = (1 - ease) * 0.85;
+          ctx.fillStyle = theme.bg1;
           ctx.fillRect(0, 0, canvas.width, canvas.height);
-        } else if (sceneProgress > 0.93 && sceneIdx < scenes.length - 1) {
-          ctx.fillStyle = `rgba(255,255,255,${(sceneProgress - 0.93) / 0.07})`;
+          ctx.globalAlpha = 1;
+        } else if (sceneProgress > 0.88 && sceneIdx < scenes.length - 1) {
+          const fadeP = (sceneProgress - 0.88) / 0.12;
+          const ease = Math.pow(fadeP, 2);
+          const nextTheme = themes[(sceneIdx + 1) % themes.length];
+          ctx.globalAlpha = ease * 0.85;
+          ctx.fillStyle = nextTheme.bg1;
           ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.globalAlpha = 1;
+        }
+
+        // 9. 开场幕布（前 900ms）：红色幕布从中间向两侧拉开
+        const curtainMs = 900;
+        if (elapsed < curtainMs) {
+          const cp = elapsed / curtainMs;
+          const half = (canvas.width / 2) * (1 - cp);
+          const curtainGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+          curtainGrad.addColorStop(0, '#c0392b');
+          curtainGrad.addColorStop(1, '#7b1f15');
+          ctx.fillStyle = curtainGrad;
+          ctx.fillRect(0, 0, half, canvas.height);
+          ctx.fillRect(canvas.width - half, 0, half, canvas.height);
+          // 幕布边缘竖条褶皱
+          ctx.fillStyle = 'rgba(0,0,0,0.25)';
+          for (let s = 0; s < 6; s += 1) {
+            const sx = (half / 6) * s;
+            ctx.fillRect(sx, 0, 2, canvas.height);
+            ctx.fillRect(canvas.width - sx - 2, 0, 2, canvas.height);
+          }
+          // 顶部金色挂杆
+          ctx.fillStyle = '#d4a017';
+          ctx.fillRect(0, 0, canvas.width, isPortrait ? 16 : 22);
+          // 开场标题居中
+          if (cp < 0.7) {
+            ctx.globalAlpha = 1 - cp / 0.7;
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${isPortrait ? 56 : 72}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('🎬 开演啦！', canvas.width / 2, canvas.height / 2);
+            ctx.textAlign = 'start';
+            ctx.textBaseline = 'alphabetic';
+            ctx.globalAlpha = 1;
+          }
+        }
+
+        // 10. 结尾"再见"（最后 1500ms）：半透明遮罩 + 居中大字 + 挥手 emoji
+        const farewellMs = 1500;
+        if (elapsed > durationMs - farewellMs) {
+          const fp = Math.min(1, (elapsed - (durationMs - farewellMs)) / farewellMs);
+          ctx.fillStyle = `rgba(255,255,255,${0.55 * fp})`;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          const popScale = 0.6 + Math.min(1, fp * 3) * 0.4;
+          const waveAngle = Math.sin(t * 8) * 0.25;
+          ctx.save();
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.scale(popScale, popScale);
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.font = `${isPortrait ? 120 : 160}px sans-serif`;
+          ctx.save();
+          ctx.rotate(waveAngle);
+          ctx.fillText('👋', 0, -isPortrait ? -30 : -40);
+          ctx.restore();
+          ctx.fillStyle = theme.accent;
+          ctx.font = `bold ${isPortrait ? 64 : 84}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+          ctx.fillText('小朋友再见！', 0, isPortrait ? 90 : 110);
+          ctx.restore();
+          ctx.textAlign = 'start';
+          ctx.textBaseline = 'alphabetic';
         }
 
         if (elapsed < durationMs) raf = requestAnimationFrame(draw);
@@ -2473,17 +2732,33 @@ export default function AppLearning() {
             <div className="hero-banner-sub">两种方式生成的作品都会自动进入下方"作品库"，统一管理</div>
           </div>
 
-          <Tabs
-            activeKey={createMode}
-            onChange={(k) => setCreateMode(k as 'upload' | 'paste')}
-            className="creator-tabs"
-            items={[
-              {
-                key: 'upload',
-                label: '📤 上传文件',
-                children: (
-                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                    <div className="upload-pick-grid">
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Space wrap align="center" size={10} className="upload-row">
+              {children.length > 1 ? (
+                <Select
+                  allowClear
+                  placeholder="绑定孩子"
+                  style={{ width: 160 }}
+                  getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                  value={uploadChildId}
+                  onChange={(v) => setUploadChildId(v)}
+                  options={children.map((c) => ({ label: c.name, value: c.id }))}
+                />
+              ) : children.length === 1 ? (
+                <Tag color="blue" style={{ padding: '4px 8px' }}>👶 {children[0].name}</Tag>
+              ) : null}
+              <Input
+                type="date"
+                value={uploadScheduledDate}
+                onChange={(e) => setUploadScheduledDate(e.target.value)}
+                style={{ width: 160 }}
+                prefix={<span>📅</span>}
+              />
+            </Space>
+
+            <div className="unified-section">
+              <div className="unified-section-title">📤 拍照 / 选文件</div>
+              <div className="upload-pick-grid">
                       <label className="file-pick-btn camera">
                         <span className="file-pick-emoji">📷</span>
                         <span className="file-pick-label">拍照</span>
@@ -2623,8 +2898,8 @@ export default function AppLearning() {
                       );
                     })()}
 
-                    <Space wrap align="center" size={10} className="upload-row">
-                      {uploadFile && (
+                    {uploadFile && (
+                      <Space wrap align="center" size={10} className="upload-row">
                         <Tag color="blue" closable onClose={(e) => {
                           e.preventDefault();
                           setUploadFile(null);
@@ -2632,28 +2907,6 @@ export default function AppLearning() {
                         }}>
                           {uploadFile.name}
                         </Tag>
-                      )}
-                      {children.length > 1 ? (
-                        <Select
-                          allowClear
-                          placeholder="绑定孩子"
-                          style={{ width: 160 }}
-                          getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                          value={uploadChildId}
-                          onChange={(v) => setUploadChildId(v)}
-                          options={children.map((c) => ({ label: c.name, value: c.id }))}
-                        />
-                      ) : children.length === 1 ? (
-                        <Tag color="blue" style={{ padding: '4px 8px' }}>👶 {children[0].name}</Tag>
-                      ) : null}
-                      <Input
-                        type="date"
-                        value={uploadScheduledDate}
-                        onChange={(e) => setUploadScheduledDate(e.target.value)}
-                        style={{ width: 160 }}
-                        prefix={<span>📅</span>}
-                      />
-                      {uploadFile && (
                         <Button
                           type="primary"
                           className="hero-cta"
@@ -2663,53 +2916,34 @@ export default function AppLearning() {
                         >
                           ⬆️ 上传到作品库
                         </Button>
-                      )}
-                    </Space>
-                  </Space>
-                ),
-              },
-              {
-                key: 'paste',
-                label: '📝 粘贴文本',
-                children: (
-                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                    <Input
-                      value={directMediaTitle}
-                      onChange={(e) => setDirectMediaTitle(e.target.value)}
-                      placeholder="给作品起个名字（用于作品库识别）"
-                      maxLength={40}
-                    />
-                    <Input.TextArea
-                      value={directMediaText}
-                      onChange={(e) => setDirectMediaText(e.target.value)}
-                      placeholder="把要朗读 / 演绎的故事 / 课文 / 知识点粘贴到这里…"
-                      autoSize={{ minRows: 4, maxRows: 10 }}
-                      maxLength={2400}
-                      showCount
-                    />
-                    <Space wrap align="center" size={10}>
-                      {children.length > 1 ? (
-                        <Select
-                          allowClear
-                          placeholder="绑定孩子"
-                          style={{ width: 160 }}
-                          getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                          value={uploadChildId}
-                          onChange={(v) => setUploadChildId(v)}
-                          options={children.map((c) => ({ label: c.name, value: c.id }))}
-                        />
-                      ) : children.length === 1 ? (
-                        <Tag color="blue" style={{ padding: '4px 8px' }}>👶 {children[0].name}</Tag>
-                      ) : null}
+                      </Space>
+                    )}
+                  </div>
+
+                  <div className="library-divider">
+                    <span className="library-divider-line" />
+                    <span className="library-divider-label">📝 或者直接粘贴文字</span>
+                    <span className="library-divider-line" />
+                  </div>
+
+                  <div className="unified-section">
+                    <div className="unified-section-title">📝 粘贴文本</div>
+                    <Space direction="vertical" size={10} style={{ width: '100%' }}>
                       <Input
-                        type="date"
-                        value={uploadScheduledDate}
-                        onChange={(e) => setUploadScheduledDate(e.target.value)}
-                        style={{ width: 160 }}
-                        prefix={<span>📅</span>}
+                        value={directMediaTitle}
+                        onChange={(e) => setDirectMediaTitle(e.target.value)}
+                        placeholder="给作品起个名字（用于作品库识别）"
+                        maxLength={40}
                       />
-                    </Space>
-                    {(() => {
+                      <Input.TextArea
+                        value={directMediaText}
+                        onChange={(e) => setDirectMediaText(e.target.value)}
+                        placeholder="把要朗读 / 演绎的故事 / 课文 / 知识点粘贴到这里…"
+                        autoSize={{ minRows: 4, maxRows: 10 }}
+                        maxLength={2400}
+                        showCount
+                      />
+                      {(() => {
                       const text = directMediaText.trim();
                       const hasText = !!text;
                       const isAudioBusy = materialBusyId === 'paste-preview' && materialAction === 'audio';
@@ -2763,11 +2997,9 @@ export default function AppLearning() {
                         </Space>
                       );
                     })()}
-                  </Space>
-                ),
-              },
-            ]}
-          />
+                    </Space>
+                  </div>
+          </Space>
 
           {(uploading || uploadStage) && (
             <div className="upload-progress-box">
@@ -2807,7 +3039,6 @@ export default function AppLearning() {
             renderItem={(item) => {
               const parsed = parseMaterialContent(item.content);
               const materialStatus = getMaterialStatusMeta(parsed.status);
-              const fileHref = parsed.fileUrl ? resolveAssetUrl(parsed.fileUrl) : '';
               const resolvedAudioUrl = parsed.audioUrl ? resolveAssetUrl(parsed.audioUrl) : '';
               const resolvedVideoUrl = parsed.videoUrl ? resolveAssetUrl(parsed.videoUrl) : '';
               const localVideoUrl = generatedVideoUrls[item.id] || '';
@@ -2922,7 +3153,7 @@ export default function AppLearning() {
                     })()}
 
                     {audioReady && showAudioPlayer && (
-                      <div className="media-frame audio-frame">
+                      <div className="media-frame audio-frame" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
                         <Button
                           className="media-close-btn"
                           shape="circle"
@@ -2934,10 +3165,19 @@ export default function AppLearning() {
                         </Button>
                         <audio
                           controls
+                          controlsList="nodownload"
+                          preload="metadata"
                           autoPlay={expandedAudioMaterialId === item.id}
                           src={resolvedAudioUrl}
                           style={{ width: '100%' }}
                         />
+                        <Button
+                          size="small"
+                          block
+                          onClick={() => setExpandedAudioMaterialId(null)}
+                        >
+                          ← 返回
+                        </Button>
                       </div>
                     )}
 
@@ -2997,7 +3237,7 @@ export default function AppLearning() {
                     )}
 
                     {videoReady && showVideoPlayer && (
-                      <div className="media-frame video-frame">
+                      <div className="media-frame video-frame" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                         <Button
                           className="media-close-btn"
                           shape="circle"
@@ -3009,19 +3249,31 @@ export default function AppLearning() {
                         </Button>
                         <video
                           controls
+                          controlsList="nodownload"
+                          preload="metadata"
+                          playsInline
                           autoPlay={expandedVideoMaterialId === item.id}
                           src={playableVideoUrl}
                           style={{ width: '100%', borderRadius: 10, background: '#000' }}
+                          ref={(el) => {
+                            if (el) {
+                              el.setAttribute('webkit-playsinline', 'true');
+                              el.setAttribute('x5-playsinline', 'true');
+                              el.setAttribute('x5-video-player-type', 'h5');
+                            }
+                          }}
                         />
+                        <Button
+                          size="small"
+                          block
+                          onClick={() => setExpandedVideoMaterialId(null)}
+                        >
+                          ← 返回
+                        </Button>
                       </div>
                     )}
 
                     <Space wrap size={8} className="material-action-row">
-                      {!!fileHref && (
-                        <Typography.Link href={fileHref} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13 }}>
-                          查看原文件
-                        </Typography.Link>
-                      )}
                       <Button
                         size="small"
                         type={audioReady ? 'default' : 'primary'}

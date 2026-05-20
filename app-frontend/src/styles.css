@@ -417,20 +417,38 @@ body {
 
 .media-close-btn {
   position: absolute !important;
-  top: -10px;
-  right: -10px;
-  z-index: 5;
-  background: #ffffff !important;
+  top: 6px;
+  right: 6px;
+  z-index: 10;
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  background: rgba(255, 255, 255, 0.95) !important;
   border: 1px solid #d9d9d9 !important;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12) !important;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18) !important;
   color: #595959 !important;
-  font-size: 12px !important;
+  font-size: 14px !important;
 }
 
 .media-close-btn:hover {
   color: #fff !important;
   background: #ff4d4f !important;
   border-color: #ff4d4f !important;
+}
+
+.unified-section {
+  background: #ffffff;
+  border: 1px solid #e6f0ff;
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 4px 10px rgba(31, 35, 53, 0.04);
+}
+
+.unified-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1d39c4;
+  margin-bottom: 10px;
 }
 
 .creator-tabs .ant-tabs-tab {
