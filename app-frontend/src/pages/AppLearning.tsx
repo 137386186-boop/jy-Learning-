@@ -2945,6 +2945,98 @@ export default function AppLearning() {
                               onClick={onSaveOcrToLibrary}
                             >仅保存文字到作品库</Button>
                           </Space>
+
+                          {ttsState?.materialId === 'ocr-preview' && (
+                            <div className="media-frame audio-frame" style={{ padding: 12, marginTop: 10 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                <Typography.Text strong>🔊 正在朗读 {ttsState.isPaused ? '（已暂停）' : ''}</Typography.Text>
+                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                  第 {ttsState.segmentIdx + 1} / {ttsState.totalSegments} 段 · 约 {ttsState.totalChars} 字
+                                </Typography.Text>
+                              </div>
+                              <Slider
+                                min={0}
+                                max={Math.max(0, ttsState.totalSegments - 1)}
+                                step={1}
+                                value={ttsState.segmentIdx}
+                                tooltip={{
+                                  formatter: (val) => {
+                                    const v = typeof val === 'number' ? val : 0;
+                                    const ch = ttsState.charsBefore[v] ?? 0;
+                                    const pct = ttsState.totalChars ? Math.round((ch / ttsState.totalChars) * 100) : 0;
+                                    return `第 ${v + 1} 段 · ${pct}%`;
+                                  },
+                                }}
+                                onChange={(val) => {
+                                  ttsCtrlRef.current?.seekToSegment(typeof val === 'number' ? val : 0);
+                                }}
+                              />
+                              <Space wrap size={8} style={{ marginTop: 6 }}>
+                                {ttsState.isPaused ? (
+                                  <Button size="small" type="primary" onClick={() => ttsCtrlRef.current?.resume()}>▶️ 继续</Button>
+                                ) : (
+                                  <Button size="small" onClick={() => ttsCtrlRef.current?.pause()}>⏸ 暂停</Button>
+                                )}
+                                <Button size="small" onClick={() => ttsCtrlRef.current?.stop()}>⏹ 停止</Button>
+                                <span style={{ fontSize: 12, color: '#8c8c8c' }}>速度</span>
+                                <Select
+                                  size="small"
+                                  value={ttsRate}
+                                  style={{ width: 96 }}
+                                  getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                                  onChange={(v) => {
+                                    setTtsRate(v);
+                                    ttsCtrlRef.current?.setRate(v);
+                                  }}
+                                  options={[
+                                    { label: '0.5×', value: 0.5 },
+                                    { label: '0.75×', value: 0.75 },
+                                    { label: '1×', value: 1 },
+                                    { label: '1.25×', value: 1.25 },
+                                    { label: '1.5×', value: 1.5 },
+                                    { label: '2×', value: 2 },
+                                  ]}
+                                />
+                              </Space>
+                            </div>
+                          )}
+
+                          {expandedVideoMaterialId === 'ocr-preview' && generatedVideoUrls['ocr-preview'] && (
+                            <div className="media-frame video-frame" style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+                              <Button
+                                className="media-close-btn"
+                                shape="circle"
+                                size="small"
+                                onClick={() => setExpandedVideoMaterialId(null)}
+                                aria-label="收起视频"
+                              >
+                                ✕
+                              </Button>
+                              <video
+                                controls
+                                controlsList="nodownload"
+                                preload="metadata"
+                                playsInline
+                                autoPlay
+                                src={generatedVideoUrls['ocr-preview']}
+                                style={{ width: '100%', borderRadius: 10, background: '#000' }}
+                                ref={(el) => {
+                                  if (el) {
+                                    el.setAttribute('webkit-playsinline', 'true');
+                                    el.setAttribute('x5-playsinline', 'true');
+                                    el.setAttribute('x5-video-player-type', 'h5');
+                                  }
+                                }}
+                              />
+                              <Button
+                                size="small"
+                                block
+                                onClick={() => setExpandedVideoMaterialId(null)}
+                              >
+                                ← 返回
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       );
                     })()}
@@ -3048,6 +3140,98 @@ export default function AppLearning() {
                         </Space>
                       );
                     })()}
+
+                    {ttsState?.materialId === 'paste-preview' && (
+                      <div className="media-frame audio-frame" style={{ padding: 12 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                          <Typography.Text strong>🔊 正在朗读 {ttsState.isPaused ? '（已暂停）' : ''}</Typography.Text>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            第 {ttsState.segmentIdx + 1} / {ttsState.totalSegments} 段 · 约 {ttsState.totalChars} 字
+                          </Typography.Text>
+                        </div>
+                        <Slider
+                          min={0}
+                          max={Math.max(0, ttsState.totalSegments - 1)}
+                          step={1}
+                          value={ttsState.segmentIdx}
+                          tooltip={{
+                            formatter: (val) => {
+                              const v = typeof val === 'number' ? val : 0;
+                              const ch = ttsState.charsBefore[v] ?? 0;
+                              const pct = ttsState.totalChars ? Math.round((ch / ttsState.totalChars) * 100) : 0;
+                              return `第 ${v + 1} 段 · ${pct}%`;
+                            },
+                          }}
+                          onChange={(val) => {
+                            ttsCtrlRef.current?.seekToSegment(typeof val === 'number' ? val : 0);
+                          }}
+                        />
+                        <Space wrap size={8} style={{ marginTop: 6 }}>
+                          {ttsState.isPaused ? (
+                            <Button size="small" type="primary" onClick={() => ttsCtrlRef.current?.resume()}>▶️ 继续</Button>
+                          ) : (
+                            <Button size="small" onClick={() => ttsCtrlRef.current?.pause()}>⏸ 暂停</Button>
+                          )}
+                          <Button size="small" onClick={() => ttsCtrlRef.current?.stop()}>⏹ 停止</Button>
+                          <span style={{ fontSize: 12, color: '#8c8c8c' }}>速度</span>
+                          <Select
+                            size="small"
+                            value={ttsRate}
+                            style={{ width: 96 }}
+                            getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                            onChange={(v) => {
+                              setTtsRate(v);
+                              ttsCtrlRef.current?.setRate(v);
+                            }}
+                            options={[
+                              { label: '0.5×', value: 0.5 },
+                              { label: '0.75×', value: 0.75 },
+                              { label: '1×', value: 1 },
+                              { label: '1.25×', value: 1.25 },
+                              { label: '1.5×', value: 1.5 },
+                              { label: '2×', value: 2 },
+                            ]}
+                          />
+                        </Space>
+                      </div>
+                    )}
+
+                    {expandedVideoMaterialId === 'paste-preview' && generatedVideoUrls['paste-preview'] && (
+                      <div className="media-frame video-frame" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <Button
+                          className="media-close-btn"
+                          shape="circle"
+                          size="small"
+                          onClick={() => setExpandedVideoMaterialId(null)}
+                          aria-label="收起视频"
+                        >
+                          ✕
+                        </Button>
+                        <video
+                          controls
+                          controlsList="nodownload"
+                          preload="metadata"
+                          playsInline
+                          autoPlay
+                          src={generatedVideoUrls['paste-preview']}
+                          style={{ width: '100%', borderRadius: 10, background: '#000' }}
+                          ref={(el) => {
+                            if (el) {
+                              el.setAttribute('webkit-playsinline', 'true');
+                              el.setAttribute('x5-playsinline', 'true');
+                              el.setAttribute('x5-video-player-type', 'h5');
+                            }
+                          }}
+                        />
+                        <Button
+                          size="small"
+                          block
+                          onClick={() => setExpandedVideoMaterialId(null)}
+                        >
+                          ← 返回
+                        </Button>
+                      </div>
+                    )}
                     </Space>
                   </div>
           </Space>
