@@ -1458,10 +1458,16 @@ export default function AppLearning() {
       if (ttsRes.ok) {
         narrationArrayBuf = await ttsRes.arrayBuffer();
       } else {
-        message.warning('旁白合成失败，视频将仅含背景音乐');
+        let detail = '';
+        try {
+          const j = await ttsRes.json();
+          detail = j?.error ? `（${j.error}）` : '';
+        } catch { /* ignore */ }
+        message.warning(`旁白合成失败${detail}，视频将仅含背景音乐`);
       }
-    } catch {
-      message.warning('旁白合成失败，视频将仅含背景音乐');
+    } catch (e) {
+      const m = e instanceof Error ? e.message : '';
+      message.warning(`旁白合成失败${m ? `（${m}）` : ''}，视频将仅含背景音乐`);
     }
 
     let audioContext: AudioContext | null = null;

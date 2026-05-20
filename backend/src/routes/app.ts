@@ -1517,6 +1517,7 @@ router.post('/tts', requireAppParent, ttsLimiter, async (req: Request, res: Resp
     res.send(buf);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'tts_failed';
+    console.error('[tts] synth failed:', msg, err instanceof Error ? err.stack : '');
     res.status(502).json({ error: msg });
   }
 });
@@ -1591,6 +1592,7 @@ router.post('/tts/long', requireAppParent, ttsLongLimiter, async (req: Request, 
     res.send(merged);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'tts_failed';
+    console.error('[tts/long] synth failed:', msg, err instanceof Error ? err.stack : '');
     res.status(502).json({ error: msg });
   }
 });
