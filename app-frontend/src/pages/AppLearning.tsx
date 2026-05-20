@@ -1248,9 +1248,22 @@ export default function AppLearning() {
         let errCode = '';
         try { const j = await resp.json(); errCode = String(j?.error || ''); } catch { /* ignore */ }
         message.destroy(key);
-        if (errCode === 'tts_rate_limited') message.error('朗读请求过于频繁，请稍后再试');
-        else if (errCode === 'tts_text_too_long') message.error('文本过长，无法朗读（最多 8000 字）');
-        else message.error('朗读失败：' + (errCode || `HTTP ${resp.status}`));
+        const isUpstream403 = /403/.test(errCode) || /Unexpected server response/i.test(errCode);
+        if (errCode === 'tts_rate_limited') {
+          message.error({ content: '朗读请求过于频繁，请稍后再试', duration: 6 });
+        } else if (errCode === 'tts_text_too_long') {
+          message.error({ content: '文本过长，无法朗读（最多 8000 字）', duration: 6 });
+        } else if (isUpstream403 || resp.status === 502 || resp.status === 403) {
+          message.error({
+            content: `朗读失败：语音服务暂时不可用（HTTP ${resp.status}${errCode ? ' / ' + errCode : ''}）。请稍后重试。`,
+            duration: 8,
+          });
+        } else {
+          message.error({
+            content: `朗读失败：${errCode || `HTTP ${resp.status}`}`,
+            duration: 6,
+          });
+        }
         cleanup(true);
         return;
       }
@@ -1642,9 +1655,12 @@ export default function AppLearning() {
 
       const startedAt = Date.now();
       let raf = 0;
+      let frameCounter = 0;
 
       const draw = () => {
         const elapsed = Date.now() - startedAt;
+        frameCounter += 1;
+        try {
 
         // 当前场景
         let sceneIdx = scenes.length - 1;
@@ -2117,6 +2133,7 @@ export default function AppLearning() {
         }
 
         if (elapsed < durationMs) raf = requestAnimationFrame(draw);
+        } catch { /* 单帧绘制异常不应中断录制循环 */ }
       };
 
       await new Promise<void>((resolve, reject) => {
