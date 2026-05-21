@@ -902,7 +902,10 @@ export default function AppLearning() {
     if (ocrPreview?.thumbUrl) {
       try { URL.revokeObjectURL(ocrPreview.thumbUrl); } catch { /* ignore */ }
     }
-    setOcrPreview(null);
+    // 先把缩略图渲染出来，再去跑 OCR（用户最关心的是"我能看到我刚拍/选的图"）
+    const baseTitle = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || '拍照学习';
+    const thumbUrl = URL.createObjectURL(file);
+    setOcrPreview({ file, text: '', thumbUrl, title: baseTitle });
     setOcrTextRevealed(false);
     setOcrBusy(true);
     setOcrPercent(2);
@@ -915,16 +918,16 @@ export default function AppLearning() {
         else setOcrStage('✅ 识别完成');
       });
       const cleaned = sanitizeOcrText(text || '');
-      const baseTitle = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || '拍照学习';
-      const thumbUrl = URL.createObjectURL(file);
-      setOcrPreview({ file, text: cleaned, thumbUrl, title: baseTitle });
+      setOcrPreview((prev) => prev ? { ...prev, text: cleaned } : { file, text: cleaned, thumbUrl, title: baseTitle });
       if (!cleaned) {
         message.warning('图片里没有识别到清晰文字（可能是插画/手写），请在下方文本框手动输入要朗读的内容');
       } else {
         message.success(`✅ 识别到 ${cleaned.length} 个字，请检查并编辑后再生成音视频`);
       }
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '识别失败，请稍后重试');
+      // OCR 失败也保留缩略图，用户可以手动输入文字继续生成音视频
+      message.error(`${e instanceof Error ? e.message : '识别失败'}，可以直接在下方手动输入要朗读的文字`);
+      setOcrTextRevealed(true);
     } finally {
       setOcrBusy(false);
       window.setTimeout(() => {
@@ -1545,10 +1548,10 @@ export default function AppLearning() {
 
     message.loading({ content: `🎬 正在生成${isPortrait ? '竖屏' : '横屏'}视频，请保持手机平稳、不要摇晃…`, key: `video-${videoKey}` });
 
-    // 旁白文本必须和画面 scenes 对齐：
-    // - 原始 OCR 文本里 "1+0=1 1+1=2 ..." 之间只有空格，Edge TTS 会把数字粘成一长串（出现 "72➕-8" 这种乱串）。
-    // - 画面只会展示前 14 幕，旁白若读完全文，后半段会和画面脱节、听上去"越来越快"。
-    // 所以这里：① 取 scenes（与画面同一份）② 把数学符号换成中文读法 ③ 用 。 强制断句 ④ 卡 2380 字以内
+    // 旁白与画面 scenes 必须严格对齐：
+    // - 之前用「单次合成 + 按比例拉伸每幕时长」估算，TTS 实际每句耗时和字符数并不成正比，
+    //   导致播到中后段「口播 1+1=2 而画面已经在 3+3=6」这种漂移。
+    // - 现在按 scenes 逐幕分别合成 TTS，把每幕画面时长直接锁成"该幕的真实朗读时长"，画面切换严格跟随口播。
     const symbolToCN = (s: string): string =>
       s
         .replace(/[×✖️＊*]/g, ' 乘以 ')
@@ -1558,31 +1561,32 @@ export default function AppLearning() {
         .replace(/[\-－—–]/g, ' 减 ')
         .replace(/\s+/g, ' ')
         .trim();
-    let narrationText = scenes.map(symbolToCN).filter((s) => s.length > 0).join('。');
-    if (narrationText.length > 2380) narrationText = narrationText.slice(0, 2380);
-    if (!narrationText) narrationText = content.slice(0, 2380);
+    const sceneNarrationTexts: string[] = scenes
+      .map((s) => symbolToCN(s))
+      .map((s) => (s.length > 2380 ? s.slice(0, 2380) : s));
 
-    // 先把朗读 mp3 拿到手；TTS 失败也允许继续，但只有 BGM，没有旁白
-    let narrationArrayBuf: ArrayBuffer | null = null;
-    try {
-      const ttsRes = await appFetch(`${APP_API_BASE}/tts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: narrationText }),
-      });
-      if (ttsRes.ok) {
-        narrationArrayBuf = await ttsRes.arrayBuffer();
-      } else {
-        let detail = '';
+    // 逐幕并行请求 TTS；某幕失败时退化为静默（该幕仍按字数估时长）。
+    const perSceneArrayBufs: (ArrayBuffer | null)[] = await Promise.all(
+      sceneNarrationTexts.map(async (text) => {
+        if (!text) return null;
         try {
-          const j = await ttsRes.json();
-          detail = j?.error ? `（${j.error}）` : '';
-        } catch { /* ignore */ }
-        message.warning(`旁白合成失败${detail}，视频将仅含背景音乐`);
-      }
-    } catch (e) {
-      const m = e instanceof Error ? e.message : '';
-      message.warning(`旁白合成失败${m ? `（${m}）` : ''}，视频将仅含背景音乐`);
+          const ttsRes = await appFetch(`${APP_API_BASE}/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          });
+          if (!ttsRes.ok) return null;
+          return await ttsRes.arrayBuffer();
+        } catch {
+          return null;
+        }
+      })
+    );
+    const ttsFailCount = perSceneArrayBufs.filter((b) => !b || b.byteLength === 0).length;
+    if (ttsFailCount === perSceneArrayBufs.length) {
+      message.warning('旁白合成失败，视频将仅含背景音乐');
+    } else if (ttsFailCount > 0) {
+      message.warning(`部分旁白合成失败（${ttsFailCount}/${perSceneArrayBufs.length}），其余正常`);
     }
 
     let audioContext: AudioContext | null = null;
@@ -3001,7 +3005,11 @@ export default function AppLearning() {
                                 placeholder="作品名称"
                               />
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                ✅ 已识别 {ocrPreview.text.length} 字，可直接生成音频或视频
+                                {ocrBusy
+                                  ? '🔍 正在识别图片文字…'
+                                  : ocrPreview.text.trim()
+                                    ? `✅ 已识别 ${ocrPreview.text.length} 字，可直接生成音频或视频`
+                                    : '⚠️ 没有识别到文字，请在下方手动输入要朗读的内容'}
                               </Typography.Text>
                             </div>
                             <Button size="small" type="text" onClick={onClearOcrPreview}>✕</Button>
@@ -3163,26 +3171,55 @@ export default function AppLearning() {
                       );
                     })()}
 
-                    {uploadFile && (
-                      <Space wrap align="center" size={10} className="upload-row">
-                        <Tag color="blue" closable onClose={(e) => {
-                          e.preventDefault();
-                          setUploadFile(null);
-                          document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
-                        }}>
-                          {uploadFile.name}
-                        </Tag>
-                        <Button
-                          type="primary"
-                          className="hero-cta"
-                          onClick={() => onUploadMaterial(false)}
-                          loading={uploading}
-                          disabled={uploading || !uploadFile}
-                        >
-                          ⬆️ 上传到作品库
-                        </Button>
-                      </Space>
-                    )}
+                    {uploadFile && (() => {
+                      const isImage = uploadFile.type.startsWith('image/');
+                      const isVideo = uploadFile.type.startsWith('video/');
+                      const isAudio = uploadFile.type.startsWith('audio/');
+                      const previewUrl = (isImage || isVideo || isAudio) ? URL.createObjectURL(uploadFile) : '';
+                      return (
+                        <div className="upload-row" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                          {previewUrl && isImage && (
+                            <img
+                              src={previewUrl}
+                              alt="上传预览"
+                              style={{ maxWidth: 220, maxHeight: 220, borderRadius: 8, objectFit: 'cover', alignSelf: 'flex-start' }}
+                            />
+                          )}
+                          {previewUrl && isVideo && (
+                            <video
+                              src={previewUrl}
+                              controls
+                              playsInline
+                              style={{ maxWidth: 320, maxHeight: 240, borderRadius: 8, background: '#000', alignSelf: 'flex-start' }}
+                            />
+                          )}
+                          {previewUrl && isAudio && (
+                            <audio src={previewUrl} controls style={{ width: '100%', maxWidth: 320 }} />
+                          )}
+                          <Space wrap align="center" size={10}>
+                            <Tag color="blue" closable onClose={(e) => {
+                              e.preventDefault();
+                              if (previewUrl) {
+                                try { URL.revokeObjectURL(previewUrl); } catch { /* ignore */ }
+                              }
+                              setUploadFile(null);
+                              document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
+                            }}>
+                              {uploadFile.name}
+                            </Tag>
+                            <Button
+                              type="primary"
+                              className="hero-cta"
+                              onClick={() => onUploadMaterial(false)}
+                              loading={uploading}
+                              disabled={uploading || !uploadFile}
+                            >
+                              ⬆️ 上传到作品库
+                            </Button>
+                          </Space>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="library-divider">
