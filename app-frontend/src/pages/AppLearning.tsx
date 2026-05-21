@@ -1599,39 +1599,47 @@ export default function AppLearning() {
       masterGain.gain.value = 0.012;
       masterGain.connect(destination);
 
-      // 解码旁白 mp3 并接入到 destination；narration 独立 gain，远大于 BGM
-      let narrationBuffer: AudioBuffer | null = null;
-      let narrationSource: AudioBufferSourceNode | null = null;
-      if (narrationArrayBuf && narrationArrayBuf.byteLength > 0) {
-        try {
-          narrationBuffer = await audioContext.decodeAudioData(narrationArrayBuf.slice(0));
-        } catch {
-          narrationBuffer = null;
-        }
-      }
-
-      // 如果旁白比当前时长更长，按比例放大每幕时长，确保旁白完整播完才停录
-      if (narrationBuffer) {
-        const narrationDurationMs = Math.ceil(narrationBuffer.duration * 1000);
-        const needed = narrationDurationMs + 800;
-        if (needed > durationMs) {
-          const scale = needed / durationMs;
-          sceneDurations = sceneDurations.map((d) => Math.round(d * scale));
-          sceneStarts = [];
-          let acc = 0;
-          for (const d of sceneDurations) {
-            sceneStarts.push(acc);
-            acc += d;
+      // 逐幕解码 mp3，并把每幕画面时长直接锁成"该幕的真实朗读时长"，
+      // 这样画面切场景永远跟着口播走，不再因为字符数估时长而漂移。
+      const perSceneBuffers: (AudioBuffer | null)[] = await Promise.all(
+        perSceneArrayBufs.map(async (ab) => {
+          if (!ab || ab.byteLength === 0) return null;
+          try {
+            return await audioContext!.decodeAudioData(ab.slice(0));
+          } catch {
+            return null;
           }
-          durationMs = sceneStarts[sceneStarts.length - 1] + sceneDurations[sceneDurations.length - 1];
+        })
+      );
+      // 真实时长 + 350ms 句尾缓冲；解码失败的幕回退到字数估算（最少 1800ms）
+      sceneDurations = perSceneBuffers.map((buf, i) =>
+        buf
+          ? Math.max(1500, Math.round(buf.duration * 1000) + 350)
+          : Math.max(1800, rawDurations[i] || 2400)
+      );
+      sceneStarts = [];
+      {
+        let acc = 0;
+        for (const d of sceneDurations) {
+          sceneStarts.push(acc);
+          acc += d;
         }
-        const narrationGain = audioContext.createGain();
-        narrationGain.gain.value = 1.0;
-        narrationGain.connect(destination);
-        narrationSource = audioContext.createBufferSource();
-        narrationSource.buffer = narrationBuffer;
-        narrationSource.connect(narrationGain);
       }
+      durationMs = sceneStarts[sceneStarts.length - 1] + sceneDurations[sceneDurations.length - 1];
+
+      // 所有幕共用一个 narrationGain；每幕一个 AudioBufferSourceNode，
+      // 实际 start 时刻推迟到 recorder.start 之后统一调度（留 0.15s 给 MediaRecorder 抓首帧）。
+      const narrationGain = audioContext.createGain();
+      narrationGain.gain.value = 1.0;
+      narrationGain.connect(destination);
+      const perSceneSources: Array<{ src: AudioBufferSourceNode; offsetMs: number } | null> =
+        perSceneBuffers.map((buf, i) => {
+          if (!buf) return null;
+          const src = audioContext!.createBufferSource();
+          src.buffer = buf;
+          src.connect(narrationGain);
+          return { src, offsetMs: sceneStarts[i] };
+        });
 
       // 轻柔背景旋律（更缓慢，营造氛围感）
       const beatMs = 720;
@@ -2286,11 +2294,16 @@ export default function AppLearning() {
           reject(err instanceof Error ? err : new Error('video_recorder_start_failed'));
           return;
         }
-        // 录制一启动就开始播放旁白；留 0.15s 给 MediaRecorder 抓首帧，避免吞掉开头
-        if (narrationSource && audioContext) {
-          try {
-            narrationSource.start(audioContext.currentTime + 0.15);
-          } catch { /* ignore */ }
+        // 录制一启动就把每幕旁白按 sceneStarts 偏移调度上去；
+        // 留 0.15s 给 MediaRecorder 抓首帧，避免第一句被吞掉。
+        if (audioContext) {
+          const baseTime = audioContext.currentTime + 0.15;
+          for (const entry of perSceneSources) {
+            if (!entry) continue;
+            try {
+              entry.src.start(baseTime + entry.offsetMs / 1000);
+            } catch { /* ignore */ }
+          }
         }
         draw();
         stopWatchdog = window.setTimeout(() => {
