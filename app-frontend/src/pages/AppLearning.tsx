@@ -1209,154 +1209,211 @@ export default function AppLearning() {
     const totalChars = content.length;
 
     const key = `speak-${materialId}`;
-    message.loading({ content: `🔊 正在合成语音，全文约 ${totalChars} 字…`, key, duration: 0 });
+    message.loading({ content: `🔊 正在合成第 1 段，共 ${segments.length} 段…`, key, duration: 0 });
+
+    // 逐段流式：每段单独请求 /tts，拿到完整 mp3 后立即播放当前段；
+    // 同时预取后两段，避免段间停顿。相比 /tts/long 把整篇 mp3 拼接后再返回，
+    // 这里不存在 mp3 帧边界 click，初始等待也只跟第一段长度成正比。
+    type SegSlot = { url: string; fetching: boolean; failed: boolean; failedCode?: string };
+    const slots: SegSlot[] = segments.map(() => ({ url: '', fetching: false, failed: false }));
 
     let stopped = false;
-    let audio: HTMLAudioElement | null = null;
-    let audioUrl = '';
+    let currentAudio: HTMLAudioElement | null = null;
+    let currentIdx = 0;
+
+    const revokeSlot = (i: number) => {
+      const s = slots[i];
+      if (s?.url) {
+        try { URL.revokeObjectURL(s.url); } catch { /* ignore */ }
+        s.url = '';
+      }
+    };
+
+    const teardownAudio = () => {
+      if (currentAudio) {
+        try { currentAudio.pause(); } catch { /* ignore */ }
+        currentAudio.onended = null;
+        currentAudio.onerror = null;
+        currentAudio.onpause = null;
+        currentAudio.onplay = null;
+        try { currentAudio.src = ''; currentAudio.load(); } catch { /* ignore */ }
+        currentAudio = null;
+      }
+    };
 
     const cleanup = (silent: boolean) => {
       stopped = true;
-      if (audio) {
-        try { audio.pause(); } catch { /* ignore */ }
-        audio.onended = null;
-        audio.onerror = null;
-        audio.ontimeupdate = null;
-        audio.onpause = null;
-        audio.onplay = null;
-        audio.onloadedmetadata = null;
-        try { audio.src = ''; audio.load(); } catch { /* ignore */ }
-        audio = null;
-      }
-      if (audioUrl) {
-        try { URL.revokeObjectURL(audioUrl); } catch { /* ignore */ }
-        audioUrl = '';
-      }
+      teardownAudio();
+      for (let i = 0; i < slots.length; i++) revokeSlot(i);
       if (!silent) message.destroy(key);
       setTtsState(null);
       ttsCtrlRef.current = null;
     };
 
-    try {
-      const resp = await appFetch(`${APP_API_BASE}/tts/long`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: content, rate: '-4%' }),
-      });
-      if (stopped) return;
-      if (!resp.ok) {
-        let errCode = '';
-        try { const j = await resp.json(); errCode = String(j?.error || ''); } catch { /* ignore */ }
-        message.destroy(key);
-        const isUpstream403 = /403/.test(errCode) || /Unexpected server response/i.test(errCode);
-        if (errCode === 'tts_rate_limited') {
-          message.error({ content: '朗读请求过于频繁，请稍后再试', duration: 6 });
-        } else if (errCode === 'tts_text_too_long') {
-          message.error({ content: '文本过长，无法朗读（最多 8000 字）', duration: 6 });
-        } else if (isUpstream403 || resp.status === 502 || resp.status === 403) {
-          message.error({
-            content: `朗读失败：语音服务暂时不可用（HTTP ${resp.status}${errCode ? ' / ' + errCode : ''}）。请稍后重试。`,
-            duration: 8,
-          });
-        } else {
-          message.error({
-            content: `朗读失败：${errCode || `HTTP ${resp.status}`}`,
-            duration: 6,
-          });
-        }
-        cleanup(true);
-        return;
+    const describeError = (errCode: string, status: number) => {
+      const isUpstream403 = /403/.test(errCode) || /Unexpected server response/i.test(errCode);
+      if (errCode === 'tts_rate_limited') return '朗读请求过于频繁，请稍后再试';
+      if (errCode === 'tts_text_too_long') return '段落过长，已跳过';
+      if (errCode === 'tts_empty_text') return '段落为空，已跳过';
+      if (isUpstream403 || status === 502 || status === 403) {
+        return `语音服务暂时不可用（HTTP ${status}${errCode ? ' / ' + errCode : ''}）`;
       }
-      const blob = await resp.blob();
-      if (stopped) return;
-      audioUrl = URL.createObjectURL(blob);
-      audio = new Audio(audioUrl);
-      audio.preload = 'auto';
-      audio.playbackRate = ttsRateRef.current;
+      return errCode || `HTTP ${status}`;
+    };
 
-      const computeSegmentIdx = (cur: number, dur: number): number => {
-        if (!dur || Number.isNaN(dur) || dur <= 0) return 0;
-        const ratio = Math.min(1, Math.max(0, cur / dur));
-        const charsPlayed = Math.floor(ratio * totalChars);
-        for (let i = segments.length - 1; i >= 0; i--) {
-          if (charsPlayed >= charsBefore[i]) return i;
-        }
-        return 0;
-      };
-
-      const publishState = () => {
-        if (stopped || !audio) return;
-        const dur = audio.duration;
-        const cur = audio.currentTime;
-        setTtsState({
-          materialId,
-          segmentIdx: computeSegmentIdx(cur, dur),
-          totalSegments: segments.length,
-          totalChars,
-          charsBefore,
-          isPaused: audio.paused,
+    const fetchSegment = async (idx: number): Promise<void> => {
+      if (idx < 0 || idx >= segments.length) return;
+      const slot = slots[idx];
+      if (!slot || slot.url || slot.fetching || slot.failed) return;
+      slot.fetching = true;
+      try {
+        const resp = await appFetch(`${APP_API_BASE}/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: segments[idx], rate: '-4%' }),
         });
-      };
+        if (stopped) return;
+        if (!resp.ok) {
+          let errCode = '';
+          try { const j = await resp.json(); errCode = String(j?.error || ''); } catch { /* ignore */ }
+          slot.failed = true;
+          slot.failedCode = describeError(errCode, resp.status);
+          return;
+        }
+        const blob = await resp.blob();
+        if (stopped) return;
+        slot.url = URL.createObjectURL(blob);
+      } catch (err) {
+        if (stopped) return;
+        slot.failed = true;
+        slot.failedCode = err instanceof Error ? err.message : String(err);
+      } finally {
+        slot.fetching = false;
+      }
+    };
 
-      audio.onloadedmetadata = publishState;
-      audio.ontimeupdate = publishState;
-      audio.onplay = publishState;
-      audio.onpause = publishState;
-      audio.onended = () => {
-        message.success({ content: '✅ 朗读完成', key });
-        cleanup(true);
-      };
-      audio.onerror = () => {
-        message.error({ content: '朗读播放失败', key });
-        cleanup(true);
-      };
+    const waitForSlot = async (idx: number): Promise<SegSlot | null> => {
+      if (idx < 0 || idx >= segments.length) return null;
+      // 触发本段（若未在拉取）；同时预热下两段
+      void fetchSegment(idx);
+      void fetchSegment(idx + 1);
+      void fetchSegment(idx + 2);
+      const start = Date.now();
+      // 用轮询，避免引入 EventTarget 包装；段间间隔本身就 < 200ms 级别
+      while (!stopped) {
+        const slot = slots[idx];
+        if (slot.url || slot.failed) return slot;
+        if (Date.now() - start > 30000) {
+          slot.failed = true;
+          slot.failedCode = '合成超时';
+          return slot;
+        }
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      return null;
+    };
 
-      const ctrl: TtsCtrl = {
-        pause: () => { try { audio?.pause(); } catch { /* ignore */ } },
-        resume: () => { try { audio?.play().catch(() => {}); } catch { /* ignore */ } },
-        stop: () => { cleanup(false); },
-        seekToSegment: (target: number) => {
-          if (!audio) return;
-          const idx = Math.max(0, Math.min(segments.length - 1, Math.floor(target)));
-          const dur = audio.duration;
-          if (!dur || Number.isNaN(dur) || dur <= 0) return;
-          const charRatio = charsBefore[idx] / Math.max(1, totalChars);
-          try { audio.currentTime = Math.min(dur - 0.05, Math.max(0, charRatio * dur)); } catch { /* ignore */ }
-          if (audio.paused) { try { audio.play().catch(() => {}); } catch { /* ignore */ } }
-        },
-        setRate: (rate: number) => {
-          const clamped = Math.max(0.5, Math.min(2.0, rate));
-          ttsRateRef.current = clamped;
-          if (audio) audio.playbackRate = clamped;
-        },
-      };
-      ttsCtrlRef.current = ctrl;
-
-      message.destroy(key);
+    const publishState = (idx: number, paused: boolean) => {
+      if (stopped) return;
       setTtsState({
         materialId,
-        segmentIdx: 0,
+        segmentIdx: idx,
         totalSegments: segments.length,
         totalChars,
         charsBefore,
-        isPaused: false,
+        isPaused: paused,
       });
-      try {
-        await audio.play();
-      } catch (err) {
-        message.error('朗读启动失败：' + (err instanceof Error ? err.message : String(err)));
+    };
+
+    const playSegment = async (idx: number): Promise<void> => {
+      if (stopped) return;
+      if (idx >= segments.length) {
+        message.success({ content: '✅ 朗读完成', key });
         cleanup(true);
         return;
       }
+      currentIdx = idx;
+      message.loading({ content: `🔊 第 ${idx + 1}/${segments.length} 段…`, key, duration: 0 });
+      const slot = await waitForSlot(idx);
+      if (stopped || !slot) return;
+      if (slot.failed || !slot.url) {
+        // 跳过失败段，继续往后走，避免一段失败就整篇停
+        if (slot.failedCode) {
+          message.warning({ content: `第 ${idx + 1} 段：${slot.failedCode}，已跳过`, duration: 3 });
+        }
+        // 释放掉一段也没必要保留的 slot；播放下一段
+        revokeSlot(idx);
+        await playSegment(idx + 1);
+        return;
+      }
 
-      (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel = () => {
-        cleanup(true);
+      // 切换 audio：复用同一个对象在某些浏览器（尤其 iOS Safari）会有事件冒泡到下一段，
+      // 索性每段新建并显式 teardown 上一段
+      teardownAudio();
+      const audio = new Audio(slot.url);
+      audio.preload = 'auto';
+      audio.playbackRate = ttsRateRef.current;
+      currentAudio = audio;
+
+      audio.onplay = () => publishState(idx, false);
+      audio.onpause = () => publishState(idx, audio.paused);
+      audio.onerror = () => {
+        // 当前段播放失败，跳过
+        message.warning({ content: `第 ${idx + 1} 段播放失败，已跳过`, duration: 3 });
+        revokeSlot(idx);
+        if (currentAudio === audio) currentAudio = null;
+        void playSegment(idx + 1);
       };
-    } catch (err) {
+      audio.onended = () => {
+        revokeSlot(idx);
+        if (currentAudio === audio) currentAudio = null;
+        void playSegment(idx + 1);
+      };
+
+      // 提前发布一次状态，让进度条立刻跟上
+      publishState(idx, false);
       message.destroy(key);
-      message.error('朗读失败：' + (err instanceof Error ? err.message : String(err)));
+
+      try {
+        await audio.play();
+      } catch (err) {
+        if (stopped) return;
+        message.error('朗读启动失败：' + (err instanceof Error ? err.message : String(err)));
+        cleanup(true);
+      }
+    };
+
+    const ctrl: TtsCtrl = {
+      pause: () => { try { currentAudio?.pause(); } catch { /* ignore */ } },
+      resume: () => { try { currentAudio?.play().catch(() => {}); } catch { /* ignore */ } },
+      stop: () => { cleanup(false); },
+      seekToSegment: (target: number) => {
+        const idx = Math.max(0, Math.min(segments.length - 1, Math.floor(target)));
+        if (idx === currentIdx && currentAudio) {
+          try { currentAudio.currentTime = 0; } catch { /* ignore */ }
+          if (currentAudio.paused) {
+            try { currentAudio.play().catch(() => {}); } catch { /* ignore */ }
+          }
+          return;
+        }
+        // 释放跳过段，避免内存堆积
+        for (let i = currentIdx; i < idx; i++) revokeSlot(i);
+        teardownAudio();
+        void playSegment(idx);
+      },
+      setRate: (rate: number) => {
+        const clamped = Math.max(0.5, Math.min(2.0, rate));
+        ttsRateRef.current = clamped;
+        if (currentAudio) currentAudio.playbackRate = clamped;
+      },
+    };
+    ttsCtrlRef.current = ctrl;
+    (window as unknown as { __jyLastTtsCancel?: () => void }).__jyLastTtsCancel = () => {
       cleanup(true);
-    }
+    };
+
+    publishState(0, false);
+    void playSegment(0);
   };
 
   const onGenerateMaterialVideo = async (
@@ -1624,6 +1681,13 @@ export default function AppLearning() {
         ['球', '⚽'], ['气球', '🎈'], ['礼物', '🎁'], ['蛋糕', '🍰'], ['糖', '🍬'],
         ['爱', '❤️'], ['心', '💖'], ['家', '🏠'], ['学校', '🏫'],
         ['水', '💧'], ['山', '⛰'], ['河', '🌊'], ['海', '🌊'],
+        // 动作动词：让"跑/跳/飞/吃/睡/笑..."这类描述也能换出对应小动作 emoji
+        ['跑', '🏃'], ['走', '🚶'], ['跳', '🤸'], ['飞', '🦋'], ['游', '🏊'],
+        ['吃', '🍽'], ['喝', '🥤'], ['睡', '😴'], ['梦', '💤'],
+        ['笑', '😄'], ['哭', '😢'], ['怕', '😱'], ['惊', '😮'], ['想', '💭'],
+        ['看', '👀'], ['听', '👂'], ['说', '💬'], ['问', '❓'], ['答', '💡'],
+        ['玩', '🎲'], ['赢', '🏆'], ['第一', '🥇'], ['加油', '💪'],
+        ['朋友', '🤝'], ['一起', '👫'],
       ];
       const scenePropsArr: string[][] = scenes.map((s) => {
         const text = String(s || '');
@@ -1780,10 +1844,15 @@ export default function AppLearning() {
         ctx.globalAlpha = 1;
 
         // 5. 双角色：左侧 charA、右侧 charB，按场景轮流"说话"
-        const charSize = isPortrait ? 180 : 210;
+        const charSize = isPortrait ? 240 : 280;
         const groundLine = groundY + (isPortrait ? 36 : 48);
-        const charAX = isPortrait ? canvas.width * 0.26 : canvas.width * 0.22;
-        const charBX = isPortrait ? canvas.width * 0.74 : canvas.width * 0.78;
+        const charAXTarget = isPortrait ? canvas.width * 0.26 : canvas.width * 0.22;
+        const charBXTarget = isPortrait ? canvas.width * 0.74 : canvas.width * 0.78;
+        // 走场入场：前 22% 进度从画面外滑入（带 easeOutCubic）
+        const walkP = Math.min(1, sceneProgress / 0.22);
+        const walkEase = 1 - Math.pow(1 - walkP, 3);
+        const charAX = -charSize * 0.6 + (charAXTarget - (-charSize * 0.6)) * walkEase;
+        const charBX = canvas.width + charSize * 0.6 + (charBXTarget - (canvas.width + charSize * 0.6)) * walkEase;
         const speakerIsA = sceneIdx % 2 === 0;
         const drawChar = (emoji: string, x: number, isSpeaker: boolean, flip: boolean) => {
           // 呼吸（非说话者主要靠这个起伏）
@@ -1862,31 +1931,68 @@ export default function AppLearning() {
         drawChar(charA, charAX, speakerIsA, false);
         drawChar(charB, charBX, !speakerIsA, true);
 
-        // 5.1 主角道具：关键词命中时，让一个大 emoji 绕着说话者公转，强化"在讲这个"
-        if (matchedProps.length > 0) {
+        // 5.1 主角道具：关键词命中时，两个小动物把它"抛接"传球，强化"在演这个"
+        if (matchedProps.length > 0 && walkEase > 0.6) {
           const heroEmoji = matchedProps[0];
-          const heroSpeakerX = speakerIsA ? charAX : charBX;
-          const orbitRadius = charSize * 0.55;
-          const orbitAngle = t * 1.4;
-          const heroX = heroSpeakerX + Math.cos(orbitAngle) * orbitRadius;
-          const heroY =
-            groundLine - charSize * 0.1 + Math.sin(orbitAngle) * orbitRadius * 0.45;
+          // 一次完整抛接 = 1.7 秒；前半程从 A 抛给 B，后半程从 B 抛回 A
+          const tossCycle = 1.7;
+          const tossPhase = ((t % tossCycle) / tossCycle) * 2; // 0..2
+          const tossForward = tossPhase < 1;
+          const tossT = tossPhase % 1; // 0..1
+          const fromX = tossForward ? charAX : charBX;
+          const toX = tossForward ? charBX : charAX;
+          // 入场动画：让 hero 开始时从 0 缩放升起
+          const heroAppear = Math.min(1, (walkEase - 0.6) / 0.4);
+          const heroX = fromX + (toX - fromX) * tossT;
+          // 抛物线：sin 形成弧顶
+          const arcH = charSize * 0.55;
+          const heroY = groundLine - charSize * 0.18 - Math.sin(tossT * Math.PI) * arcH;
+          // 旋转：飞行中翻转一圈半
+          const heroRot =
+            tossT * Math.PI * 1.5 * (tossForward ? 1 : -1) + Math.sin(t * 2.5) * 0.15;
+          const heroScale = (1 + Math.sin(tossT * Math.PI) * 0.15) * heroAppear;
           ctx.save();
           ctx.translate(heroX, heroY);
-          ctx.rotate(Math.sin(t * 2.5) * 0.25);
-          ctx.font = `${isPortrait ? 72 : 88}px sans-serif`;
+          ctx.rotate(heroRot);
+          ctx.scale(heroScale, heroScale);
+          ctx.font = `${isPortrait ? 84 : 104}px sans-serif`;
           ctx.textBaseline = 'middle';
           ctx.textAlign = 'center';
+          // 道具发光：底部柔光圆
+          const glowAlpha = 0.25 + Math.sin(tossT * Math.PI) * 0.25;
+          ctx.globalAlpha = glowAlpha;
+          ctx.fillStyle = theme.accent;
+          ctx.beginPath();
+          ctx.arc(0, 6, (isPortrait ? 52 : 64), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = '#262626';
           ctx.fillText(heroEmoji, 0, 0);
           ctx.restore();
           ctx.textBaseline = 'alphabetic';
           ctx.textAlign = 'start';
+
+          // 抛接残影轨迹：稀疏小点显示路径
+          ctx.save();
+          ctx.fillStyle = theme.accent;
+          for (let k = 1; k <= 5; k += 1) {
+            const trailT = Math.max(0, tossT - k * 0.06);
+            if (trailT <= 0) continue;
+            const tx = fromX + (toX - fromX) * trailT;
+            const ty = groundLine - charSize * 0.18 - Math.sin(trailT * Math.PI) * arcH;
+            ctx.globalAlpha = (1 - k / 5) * 0.25 * heroAppear;
+            ctx.beginPath();
+            ctx.arc(tx, ty, 5 - k * 0.6, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+          ctx.restore();
         }
 
-        // 6. 对白气泡（指向当前说话者）
+        // 6. 对白气泡（指向当前说话者）—— 缩小让角色和动画成为视觉主体
         const speakerX = speakerIsA ? charAX : charBX;
-        const bubbleW = isPortrait ? canvas.width - 80 : canvas.width * 0.62;
-        const bubbleH = isPortrait ? 240 : 220;
+        const bubbleW = isPortrait ? canvas.width - 120 : canvas.width * 0.5;
+        const bubbleH = isPortrait ? 168 : 150;
         const bubbleX = (canvas.width - bubbleW) / 2;
         // 切场时气泡从下方滑入（前 18% 进度做缓动）
         const bubbleSlideP = Math.min(1, sceneProgress / 0.18);
@@ -1932,19 +2038,18 @@ export default function AppLearning() {
         ctx.fillStyle = 'rgba(255,255,255,0.97)';
         ctx.fillRect(tailDirL + 1, bubbleY + bubbleH - 2, tailDirR - tailDirL - 2, 4);
 
-        // 气泡内文本（逐字显现）—— 前缀加上说话角色 emoji，营造一问一答的演绎感
+        // 气泡内文本（逐字显现）—— 仅以说话角色 emoji 起头，去掉冗长前缀
         const speakerEmoji = speakerIsA ? charA : charB;
         const rawSentence = scenes[sceneIdx] || '';
-        const isQuestion = sceneIdx % 2 === 0;
-        const sentence = `${speakerEmoji}${isQuestion ? '问' : '答'}：${rawSentence}`;
-        const maxCharsPerLine = isPortrait ? 13 : 18;
+        const sentence = `${speakerEmoji} ${rawSentence}`;
+        const maxCharsPerLine = isPortrait ? 16 : 22;
         const wrapped: string[] = [];
         for (let i = 0; i < sentence.length; i += maxCharsPerLine) {
           wrapped.push(sentence.slice(i, i + maxCharsPerLine));
         }
         const reveal = Math.min(1, sceneProgress * 1.6);
         const charsToShow = Math.ceil(sentence.length * reveal);
-        const fontSize = isPortrait ? 32 : 38;
+        const fontSize = isPortrait ? 24 : 30;
         ctx.font = `bold ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
         ctx.fillStyle = '#262626';
         let shown = 0;
