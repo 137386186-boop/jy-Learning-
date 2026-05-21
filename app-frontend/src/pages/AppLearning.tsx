@@ -1545,13 +1545,30 @@ export default function AppLearning() {
 
     message.loading({ content: `🎬 正在生成${isPortrait ? '竖屏' : '横屏'}视频，请保持手机平稳、不要摇晃…`, key: `video-${videoKey}` });
 
+    // 旁白文本必须和画面 scenes 对齐：
+    // - 原始 OCR 文本里 "1+0=1 1+1=2 ..." 之间只有空格，Edge TTS 会把数字粘成一长串（出现 "72➕-8" 这种乱串）。
+    // - 画面只会展示前 14 幕，旁白若读完全文，后半段会和画面脱节、听上去"越来越快"。
+    // 所以这里：① 取 scenes（与画面同一份）② 把数学符号换成中文读法 ③ 用 。 强制断句 ④ 卡 2380 字以内
+    const symbolToCN = (s: string): string =>
+      s
+        .replace(/[×✖️＊*]/g, ' 乘以 ')
+        .replace(/[÷➗]/g, ' 除以 ')
+        .replace(/[=＝]/g, ' 等于 ')
+        .replace(/[+＋]/g, ' 加 ')
+        .replace(/[\-－—–]/g, ' 减 ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    let narrationText = scenes.map(symbolToCN).filter((s) => s.length > 0).join('。');
+    if (narrationText.length > 2380) narrationText = narrationText.slice(0, 2380);
+    if (!narrationText) narrationText = content.slice(0, 2380);
+
     // 先把朗读 mp3 拿到手；TTS 失败也允许继续，但只有 BGM，没有旁白
     let narrationArrayBuf: ArrayBuffer | null = null;
     try {
       const ttsRes = await appFetch(`${APP_API_BASE}/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: content.slice(0, 2400) }),
+        body: JSON.stringify({ text: narrationText }),
       });
       if (ttsRes.ok) {
         narrationArrayBuf = await ttsRes.arrayBuffer();
