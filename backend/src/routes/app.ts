@@ -56,9 +56,10 @@ const writeLimiter = rateLimit({
 });
 
 // TTS 走免费的 Edge TTS，限频比 writeLimiter 更紧，避免被微软封我们的 IP
+// 前端朗读改成逐段流式后，长文本会被切成几十段顺序拉取，所以把上限放宽到 240/5min
 const ttsLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
-  max: 30,
+  max: 240,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'tts_rate_limited' },
