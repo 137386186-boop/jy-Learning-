@@ -304,8 +304,8 @@ export default function AppLearning() {
     setRate: (rate: number) => void;
   };
   const [ttsState, setTtsState] = useState<TtsState | null>(null);
-  const [ttsRate, setTtsRate] = useState<number>(0.75);
-  const ttsRateRef = useRef<number>(0.75);
+  const [ttsRate, setTtsRate] = useState<number>(1.0);
+  const ttsRateRef = useRef<number>(1.0);
   const ttsCtrlRef = useRef<TtsCtrl | null>(null);
   const mediaFallbackRequestedRef = useRef<{ materialId: string; kind: 'audio' | 'video' } | null>(null);
 

@@ -199,6 +199,12 @@ function lineSignalRatio(line: string): { ratio: number; valid: number } {
   return { ratio: valid / trimmed.length, valid };
 }
 
+const CJK_RE = /[一-鿿]/;
+
+// 行首是英文/字母数字"小尾巴"（页码 / 水印 / 章节英文标题）时剥掉。
+// 仅当首段是纯字母/空白/常见分隔符时剥离；保留 "5. 这是第五题" 这种中文式序号
+const LEADING_ASCII_HEAD_RE = /^[A-Za-z][A-Za-z0-9\s.,\-:;'"·•_/()]*(?=[一-鿿])/;
+
 export function sanitizeOcrText(raw: string): string {
   if (!raw) return '';
   const lines = raw.split(/\r?\n/);
@@ -207,7 +213,18 @@ export function sanitizeOcrText(raw: string): string {
     const { ratio, valid } = lineSignalRatio(line);
     if (ratio >= 0.6 && valid >= 2) kept.push(line.trim());
   }
-  const out = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  // 中文上下文优先：拍课本/绘本时，页码 / 英文水印 / 版权页几乎都不含中文。
+  // 如果识别结果整体有中文，就把不含中文的行视为噪声丢掉；
+  // 再把"行首夹带英文水印 / 章节英文小标题"剥掉，
+  // 避免 Yunxi 中文音色把这些 ASCII 字母按拼音念一遍，造成"前面一段听不懂"。
+  const hasAnyChinese = kept.some((line) => CJK_RE.test(line));
+  const filtered = hasAnyChinese
+    ? kept
+        .filter((line) => CJK_RE.test(line))
+        .map((line) => line.replace(LEADING_ASCII_HEAD_RE, '').trim())
+        .filter(Boolean)
+    : kept;
+  const out = filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   // 整体再检查一次：如果全文有效中文/英文字符过少（<4），视为无识别结果
   let totalValid = 0;
   for (const ch of out) if (VALID_CHAR_RE.test(ch)) totalValid += 1;
