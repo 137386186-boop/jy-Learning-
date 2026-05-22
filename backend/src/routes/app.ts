@@ -937,6 +937,7 @@ async function processMaterialRecognition(materialId: string, parentId: string) 
     const fileName = String(content.fileName || '未命名资料');
     const fileUrl = String(content.fileUrl || '');
     const mimeType = String(content.mimeType || '');
+    const clientOcrText = typeof content.clientOcrText === 'string' ? content.clientOcrText : '';
 
     const recognized = await recognizeMaterial({
       parentId,
@@ -944,6 +945,7 @@ async function processMaterialRecognition(materialId: string, parentId: string) 
       fileName,
       fileUrl,
       mimeType,
+      clientOcrText,
     });
 
     const previousCost = Number(content.costUsd || 0);
@@ -1156,6 +1158,11 @@ router.post('/library/materials', requireAppParent, writeLimiter, (req, res, nex
     const rawScheduled = (req.body?.scheduledDate as string | undefined)?.trim() || '';
     const scheduledDate = /^\d{4}-\d{2}-\d{2}$/.test(rawScheduled) ? rawScheduled : null;
 
+    // 客户端对图片做了带「黄色高亮区域识别」的中文 OCR，把正文随表单一起上传；
+    // 后端识别阶段优先使用它，避免把文件名当成正文去合成音视频
+    const rawClientOcr = typeof req.body?.clientOcrText === 'string' ? req.body.clientOcrText.trim() : '';
+    const clientOcrText = rawClientOcr ? rawClientOcr.slice(0, 6000) : null;
+
     const sourceType = inferSourceType(file.mimetype || '', file.originalname || file.filename);
     const fileUrl = `/uploads/app-library/${file.filename}`;
 
@@ -1173,6 +1180,7 @@ router.post('/library/materials', requireAppParent, writeLimiter, (req, res, nex
           scheduledDate,
           status: 'uploaded',
           recognitionResult: null,
+          clientOcrText,
         },
       },
     });

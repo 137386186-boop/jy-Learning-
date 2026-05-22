@@ -11,6 +11,55 @@ export interface OcrProgress {
 // 把过大的手机相册图片缩到合理尺寸 + 灰度化，极大降低识别耗时并提高中文识别准确率
 const MAX_EDGE = 1600;
 
+// 在整张图里找鲜亮黄色高亮（边框或填色）的最小外接矩形
+// 用户的典型场景：课本/绘本上正文被标黄圈起来；OCR 只想读圈内的字
+function detectYellowBoundingBox(canvas: HTMLCanvasElement): { x: number; y: number; w: number; h: number } | null {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  const W = canvas.width;
+  const H = canvas.height;
+  let data: ImageData;
+  try { data = ctx.getImageData(0, 0, W, H); } catch { return null; }
+  const px = data.data;
+  let minX = W;
+  let minY = H;
+  let maxX = -1;
+  let maxY = -1;
+  let count = 0;
+  // 大图采样步长，避免阻塞主线程
+  const step = Math.max(1, Math.round(Math.min(W, H) / 800));
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      const idx = (y * W + x) * 4;
+      const r = px[idx];
+      const g = px[idx + 1];
+      const b = px[idx + 2];
+      // 鲜亮黄：红绿都高、蓝低、红绿接近
+      if (r > 200 && g > 170 && b < 140 && r - b > 80 && Math.abs(r - g) < 60) {
+        count++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0 || count < 40) return null;
+  const w = maxX - minX;
+  const h = maxY - minY;
+  // 太小（零散噪声）或几乎占满整图（误判）都跳过
+  if (w < W * 0.15 || h < H * 0.1) return null;
+  if (w > W * 0.97 && h > H * 0.97) return null;
+  // 向内收一点像素，避免把黄色边框本身带进 OCR
+  const inset = Math.round(Math.min(w, h) * 0.02);
+  return {
+    x: Math.max(0, minX + inset),
+    y: Math.max(0, minY + inset),
+    w: Math.max(1, w - inset * 2),
+    h: Math.max(1, h - inset * 2),
+  };
+}
+
 async function preprocessImage(file: File | Blob): Promise<Blob> {
   if (typeof window === 'undefined') return file;
   const url = URL.createObjectURL(file);
@@ -24,17 +73,34 @@ async function preprocessImage(file: File | Blob): Promise<Blob> {
     const w0 = img.naturalWidth || img.width;
     const h0 = img.naturalHeight || img.height;
     if (!w0 || !h0) return file;
-    const longest = Math.max(w0, h0);
+
+    // Step 1：原尺寸画一遍，用来找黄色高亮区域
+    const detectCanvas = document.createElement('canvas');
+    detectCanvas.width = w0;
+    detectCanvas.height = h0;
+    const detectCtx = detectCanvas.getContext('2d');
+    if (!detectCtx) return file;
+    detectCtx.drawImage(img, 0, 0, w0, h0);
+
+    const bbox = detectYellowBoundingBox(detectCanvas);
+    const srcX = bbox?.x ?? 0;
+    const srcY = bbox?.y ?? 0;
+    const srcW = bbox?.w ?? w0;
+    const srcH = bbox?.h ?? h0;
+
+    // Step 2：把目标区域缩放到 MAX_EDGE 之内
+    const longest = Math.max(srcW, srcH);
     const scale = longest > MAX_EDGE ? MAX_EDGE / longest : 1;
-    const w = Math.max(1, Math.round(w0 * scale));
-    const h = Math.max(1, Math.round(h0 * scale));
+    const w = Math.max(1, Math.round(srcW * scale));
+    const h = Math.max(1, Math.round(srcH * scale));
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext('2d');
     if (!ctx) return file;
-    ctx.drawImage(img, 0, 0, w, h);
-    // 灰度 + 轻度对比度增强，对手机拍摄的文档/课本特别有效
+    ctx.drawImage(detectCanvas, srcX, srcY, srcW, srcH, 0, 0, w, h);
+
+    // Step 3：灰度 + 轻度对比度增强，对手机拍摄的文档/课本特别有效
     try {
       const data = ctx.getImageData(0, 0, w, h);
       const px = data.data;

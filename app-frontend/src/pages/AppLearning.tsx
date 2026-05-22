@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Alert, Button, Card, Checkbox, Form, Input, List, Progress, Select, Slider, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Form, Image as AntImage, Input, List, Progress, Select, Slider, Space, Tabs, Tag, Typography, Popconfirm, message } from 'antd';
 import type { FormInstance } from 'antd';
 import dayjs from 'dayjs';
 import { APP_API_BASE, appFetch, appUpload, clearAppToken, getAppToken, setAppToken } from '../api.app';
@@ -286,7 +286,6 @@ export default function AppLearning() {
   const [ocrStage, setOcrStage] = useState<string>('');
   const [ocrPercent, setOcrPercent] = useState(0);
   const [ocrPreview, setOcrPreview] = useState<{ file: File; text: string; thumbUrl: string; title: string } | null>(null);
-  const [ocrTextRevealed, setOcrTextRevealed] = useState(false);
 
   // —— 朗读文本（Web Speech TTS）播放器状态 ——
   type TtsState = {
@@ -791,6 +790,25 @@ export default function AppLearning() {
       }, 1000);
     };
     try {
+      // 图片：先在客户端跑一遍带"黄色高亮区域识别"的中文 OCR，
+      // 把正文文本随 FormData 一并上传；后端识别阶段会优先使用它，
+      // 这样生成的音视频朗读的是"图里圈起来的正文"而不是文件名。
+      let clientOcrText = '';
+      if (isLikelyImage(fileToUpload)) {
+        try {
+          setUploadStage('🔍 正在识别图片正文…');
+          const raw = await recognizeImageText(fileToUpload, (p) => {
+            // 把 OCR 阶段压缩到上传前 0-15% 进度
+            setUploadPercent(Math.min(15, Math.round(p.percent * 0.15)));
+          });
+          clientOcrText = sanitizeOcrText(raw);
+        } catch {
+          // OCR 失败不阻断上传；后端会回退到原有路径
+          clientOcrText = '';
+        }
+        setUploadStage('📤 正在上传文件…');
+      }
+
       const formData = new FormData();
       formData.append('file', fileToUpload);
       // 单孩家庭：未选时默认绑定唯一孩子
@@ -799,6 +817,7 @@ export default function AppLearning() {
       if (uploadScheduledDate && /^\d{4}-\d{2}-\d{2}$/.test(uploadScheduledDate)) {
         formData.append('scheduledDate', uploadScheduledDate);
       }
+      if (clientOcrText) formData.append('clientOcrText', clientOcrText);
 
       const uploadHandle = appUpload(
         `${APP_API_BASE}/library/materials`,
@@ -906,7 +925,6 @@ export default function AppLearning() {
     const baseTitle = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || '拍照学习';
     const thumbUrl = URL.createObjectURL(file);
     setOcrPreview({ file, text: '', thumbUrl, title: baseTitle });
-    setOcrTextRevealed(false);
     setOcrBusy(true);
     setOcrPercent(2);
     setOcrStage('📦 正在准备识别模型…');
@@ -927,7 +945,6 @@ export default function AppLearning() {
     } catch (e) {
       // OCR 失败也保留缩略图，用户可以手动输入文字继续生成音视频
       message.error(`${e instanceof Error ? e.message : '识别失败'}，可以直接在下方手动输入要朗读的文字`);
-      setOcrTextRevealed(true);
     } finally {
       setOcrBusy(false);
       window.setTimeout(() => {
@@ -942,7 +959,6 @@ export default function AppLearning() {
       try { URL.revokeObjectURL(ocrPreview.thumbUrl); } catch { /* ignore */ }
     }
     setOcrPreview(null);
-    setOcrTextRevealed(false);
     document.querySelectorAll<HTMLInputElement>('input[type="file"][data-role="material-upload"]').forEach((fi) => { fi.value = ''; });
   };
 
@@ -3008,7 +3024,13 @@ export default function AppLearning() {
                       return (
                         <div className="ocr-preview-card">
                           <div className="ocr-preview-head">
-                            <img src={ocrPreview.thumbUrl} alt="拍摄预览" className="ocr-preview-thumb" />
+                            <AntImage
+                              src={ocrPreview.thumbUrl}
+                              alt="拍摄预览"
+                              rootClassName="ocr-preview-thumb-root"
+                              className="ocr-preview-thumb"
+                              preview={{ mask: <span style={{ fontSize: 12 }}>点击放大</span> }}
+                            />
                             <div className="ocr-preview-meta">
                               <Input
                                 size="small"
@@ -3027,26 +3049,6 @@ export default function AppLearning() {
                             </div>
                             <Button size="small" type="text" onClick={onClearOcrPreview}>✕</Button>
                           </div>
-                          <div style={{ marginTop: 8 }}>
-                            <Button
-                              size="small"
-                              type="link"
-                              style={{ paddingLeft: 0 }}
-                              onClick={() => setOcrTextRevealed((v) => !v)}
-                            >
-                              {ocrTextRevealed ? '收起识别文本' : '查看/编辑识别文本'}
-                            </Button>
-                          </div>
-                          {ocrTextRevealed && (
-                            <Input.TextArea
-                              value={ocrPreview.text}
-                              onChange={(e) => setOcrPreview({ ...ocrPreview, text: e.target.value })}
-                              autoSize={{ minRows: 3, maxRows: 8 }}
-                              maxLength={2400}
-                              showCount
-                              placeholder="识别结果（可编辑）"
-                            />
-                          )}
                           <div style={{ marginTop: 8, fontSize: 12, color: '#8c8c8c', lineHeight: 1.6 }}>
                             👉 先点 <b>朗读</b> 或 <b>生成视频</b> 听听/看看效果，满意后再点 <b>保存</b> 收进作品库；保存只存文字，不会再次生成音视频。
                           </div>
@@ -3192,10 +3194,12 @@ export default function AppLearning() {
                       return (
                         <div className="upload-row" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                           {previewUrl && isImage && (
-                            <img
+                            <AntImage
                               src={previewUrl}
                               alt="上传预览"
-                              style={{ maxWidth: 220, maxHeight: 220, borderRadius: 8, objectFit: 'cover', alignSelf: 'flex-start' }}
+                              style={{ maxWidth: 220, maxHeight: 220, borderRadius: 8, objectFit: 'cover' }}
+                              rootClassName="upload-preview-image-root"
+                              preview={{ mask: <span style={{ fontSize: 12 }}>点击放大</span> }}
                             />
                           )}
                           {previewUrl && isVideo && (
@@ -3519,6 +3523,59 @@ export default function AppLearning() {
                     <div className="material-meta-row">
                       <Typography.Text type="secondary">⏱️ {dayjs(item.createdAt).format('YYYY-MM-DD HH:mm')}</Typography.Text>
                     </div>
+
+                    {parsed.fileUrl && (() => {
+                      const previewUrl = resolveAssetUrl(parsed.fileUrl);
+                      if (parsed.sourceType === 'image') {
+                        return (
+                          <div className="material-preview-row" style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                            <AntImage
+                              src={previewUrl}
+                              alt={parsed.fileName}
+                              style={{ maxWidth: 200, maxHeight: 200, borderRadius: 8, objectFit: 'cover', cursor: 'zoom-in' }}
+                              preview={{ mask: <span style={{ fontSize: 12 }}>🔍 点击放大</span> }}
+                            />
+                          </div>
+                        );
+                      }
+                      if (parsed.sourceType === 'video') {
+                        return (
+                          <div className="material-preview-row">
+                            <video
+                              src={previewUrl}
+                              controls
+                              controlsList="nodownload"
+                              preload="metadata"
+                              playsInline
+                              style={{ maxWidth: '100%', maxHeight: 260, borderRadius: 8, background: '#000' }}
+                            />
+                          </div>
+                        );
+                      }
+                      if (parsed.sourceType === 'audio') {
+                        return (
+                          <div className="material-preview-row">
+                            <audio
+                              src={previewUrl}
+                              controls
+                              controlsList="nodownload"
+                              preload="metadata"
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="material-preview-row">
+                          <Button
+                            size="small"
+                            onClick={() => window.open(previewUrl, '_blank', 'noopener,noreferrer')}
+                          >
+                            📂 在新标签页查看原文件
+                          </Button>
+                        </div>
+                      );
+                    })()}
 
                     <Space wrap size={8} className="material-org-row">
                       <span style={{ fontSize: 12, color: '#8c8c8c' }}>📅 安排到</span>

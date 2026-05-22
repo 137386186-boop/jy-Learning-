@@ -7,6 +7,9 @@ export interface RecognitionInput {
   fileUrl: string;
   sourceType: string;
   mimeType?: string | null;
+  // 客户端已经做过的 OCR 正文（图片场景：识别图里被黄色框出来的正文）
+  // 若提供且非空，识别阶段会优先采用它，避免把文件名当成正文
+  clientOcrText?: string | null;
 }
 
 export interface RecognitionResult {
@@ -75,14 +78,27 @@ function extractKeywords(text: string): string[] {
   return Array.from(new Set(top));
 }
 
+function pickClientOcr(input: RecognitionInput): string {
+  if (input.sourceType !== 'image') return '';
+  const raw = typeof input.clientOcrText === 'string' ? input.clientOcrText.trim() : '';
+  return raw;
+}
+
+async function resolveExtractedText(
+  input: RecognitionInput,
+): Promise<{ text: string; source: ExtractTextSource }> {
+  const clientOcr = pickClientOcr(input);
+  if (clientOcr) {
+    // 客户端 OCR 命中：直接当作正文使用，跳过文件名兜底
+    return { text: clientOcr, source: 'text' };
+  }
+  return detectTextFromMaterialContent(input.fileName, input.fileUrl, input.mimeType);
+}
+
 async function buildFallbackResult(
   input: RecognitionInput,
 ): Promise<{ result: RecognitionResult; textSource: ExtractTextSource }> {
-  const { text: extractedText, source } = await detectTextFromMaterialContent(
-    input.fileName,
-    input.fileUrl,
-    input.mimeType,
-  );
+  const { text: extractedText, source } = await resolveExtractedText(input);
   return {
     result: {
       sourceType: input.sourceType,
@@ -102,11 +118,7 @@ async function buildFallbackResult(
 async function buildMockAiResult(
   input: RecognitionInput,
 ): Promise<{ result: RecognitionResult; textSource: ExtractTextSource }> {
-  const { text: raw, source } = await detectTextFromMaterialContent(
-    input.fileName,
-    input.fileUrl,
-    input.mimeType,
-  );
+  const { text: raw, source } = await resolveExtractedText(input);
   const extractedText = raw.length > 1200 ? raw.slice(0, 1200) : raw;
   return {
     result: {
