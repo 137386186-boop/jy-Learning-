@@ -38,6 +38,16 @@ class MediaGenerateNeedsFallbackError extends Error {
   }
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}_timeout`)), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
+
 function resolveAssetUrl(rawUrl: string) {
   const value = rawUrl.trim();
   if (!value) return '';
@@ -1089,6 +1099,16 @@ export default function AppLearning() {
       const req = mediaFallbackRequestedRef.current;
       return !!req && req.materialId === materialId && req.kind === kind;
     };
+    // 顶层兜底：即使内部 await 出现意外死锁，也要在 240s 后强制清理 busy 态，避免按钮永远转圈。
+    let safetyTriggered = false;
+    const safetyWatchdog = setTimeout(() => {
+      safetyTriggered = true;
+      mediaFallbackRequestedRef.current = null;
+      setMaterialBusyId(null);
+      setMaterialAction(null);
+      setMediaStage(null);
+      message.error(kind === 'audio' ? '音频生成耗时过长，已自动停止，请稍后重试' : '视频生成耗时过长，已自动停止，请稍后重试');
+    }, 240000);
     try {
       await triggerMaterialRecognize(materialId);
       await pollMaterialUntilDone(materialId, 'recognize');
@@ -1161,13 +1181,18 @@ export default function AppLearning() {
         message.warning('暂未获得视频地址，请稍后重试');
       }
     } catch (e) {
-      message.error(e instanceof Error ? e.message : kind === 'audio' ? '音频生成失败，请稍后重试' : '视频生成失败，请稍后重试');
-      await reloadAll();
+      if (!safetyTriggered) {
+        message.error(e instanceof Error ? e.message : kind === 'audio' ? '音频生成失败，请稍后重试' : '视频生成失败，请稍后重试');
+        await reloadAll();
+      }
     } finally {
-      mediaFallbackRequestedRef.current = null;
-      setMaterialBusyId(null);
-      setMaterialAction(null);
-      setMediaStage(null);
+      clearTimeout(safetyWatchdog);
+      if (!safetyTriggered) {
+        mediaFallbackRequestedRef.current = null;
+        setMaterialBusyId(null);
+        setMaterialAction(null);
+        setMediaStage(null);
+      }
     }
   };
 
@@ -1188,34 +1213,49 @@ export default function AppLearning() {
     ttsCtrlRef.current = null;
     setTtsState(null);
 
-    // 分段：仅用于进度条 / 跳转滑块，真正的音频是一段完整 mp3
-    const SEGMENT_MAX = 60;
-    const segments = content
+    // 分段：仅用于进度条 / 跳转滑块。SEGMENT_MAX 取 200 字（约 30~40s 一段），
+    // 既能让 /tts 单次合成稳定（远低于后端 2400 字上限），又把段间切换次数降到最低。
+    // 早期取 60 字会让一篇 600 字的素材切换 ~10 次，每次都触发 <audio> 重建，听感断续。
+    const SEGMENT_MAX = 200;
+    // 1) 先按句末标点切，得到很多 10~40 字的小句
+    // 2) 再贪心合并相邻小句到 ≤ SEGMENT_MAX，避免一篇课文产生十几段
+    // 3) 仅当单句仍超长时才按 [，、,] 二次细分
+    const sentences = content
       .replace(/\r/g, '')
       .split(/(?<=[。！？!?；;\n])/)
       .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-      .flatMap((s) => {
-        if (s.length <= SEGMENT_MAX) return [s];
-        const parts: string[] = [];
-        const subs = s.split(/(?<=[，、,])/);
-        let buf = '';
-        for (const sub of subs) {
-          if ((buf + sub).length > SEGMENT_MAX) {
-            if (buf) parts.push(buf);
-            if (sub.length > SEGMENT_MAX) {
-              for (let i = 0; i < sub.length; i += SEGMENT_MAX) parts.push(sub.slice(i, i + SEGMENT_MAX));
-              buf = '';
+      .filter((s) => s.length > 0);
+    const segments: string[] = [];
+    {
+      let buf = '';
+      for (const s of sentences) {
+        if (s.length > SEGMENT_MAX) {
+          if (buf) { segments.push(buf); buf = ''; }
+          const subs = s.split(/(?<=[，、,])/);
+          let sb = '';
+          for (const sub of subs) {
+            if ((sb + sub).length > SEGMENT_MAX) {
+              if (sb) segments.push(sb);
+              if (sub.length > SEGMENT_MAX) {
+                for (let i = 0; i < sub.length; i += SEGMENT_MAX) segments.push(sub.slice(i, i + SEGMENT_MAX));
+                sb = '';
+              } else {
+                sb = sub;
+              }
             } else {
-              buf = sub;
+              sb += sub;
             }
-          } else {
-            buf += sub;
           }
+          if (sb) segments.push(sb);
+        } else if ((buf + s).length > SEGMENT_MAX) {
+          if (buf) segments.push(buf);
+          buf = s;
+        } else {
+          buf += s;
         }
-        if (buf) parts.push(buf);
-        return parts;
-      });
+      }
+      if (buf) segments.push(buf);
+    }
     if (!segments.length) segments.push(content);
     const charsBefore: number[] = [];
     {
@@ -1237,7 +1277,11 @@ export default function AppLearning() {
     const slots: SegSlot[] = segments.map(() => ({ url: '', fetching: false, failed: false }));
 
     let stopped = false;
-    let currentAudio: HTMLAudioElement | null = null;
+    // 复用同一个 <audio> 元素跨段切换，只换 src。每段都 new Audio() 在 iOS Safari /
+    // 移动 Chrome 上会触发音频管线重建，听感是"咔哒一下"的停顿，正是用户反馈的"断续"。
+    const sharedAudio = new Audio();
+    sharedAudio.preload = 'auto';
+    sharedAudio.playbackRate = ttsRateRef.current;
     let currentIdx = 0;
 
     const revokeSlot = (i: number) => {
@@ -1249,15 +1293,12 @@ export default function AppLearning() {
     };
 
     const teardownAudio = () => {
-      if (currentAudio) {
-        try { currentAudio.pause(); } catch { /* ignore */ }
-        currentAudio.onended = null;
-        currentAudio.onerror = null;
-        currentAudio.onpause = null;
-        currentAudio.onplay = null;
-        try { currentAudio.src = ''; currentAudio.load(); } catch { /* ignore */ }
-        currentAudio = null;
-      }
+      try { sharedAudio.pause(); } catch { /* ignore */ }
+      sharedAudio.onended = null;
+      sharedAudio.onerror = null;
+      sharedAudio.onpause = null;
+      sharedAudio.onplay = null;
+      try { sharedAudio.removeAttribute('src'); sharedAudio.load(); } catch { /* ignore */ }
     };
 
     const cleanup = (silent: boolean) => {
@@ -1366,35 +1407,26 @@ export default function AppLearning() {
         return;
       }
 
-      // 切换 audio：复用同一个对象在某些浏览器（尤其 iOS Safari）会有事件冒泡到下一段，
-      // 索性每段新建并显式 teardown 上一段
-      teardownAudio();
-      const audio = new Audio(slot.url);
-      audio.preload = 'auto';
-      audio.playbackRate = ttsRateRef.current;
-      currentAudio = audio;
-
-      audio.onplay = () => publishState(idx, false);
-      audio.onpause = () => publishState(idx, audio.paused);
-      audio.onerror = () => {
-        // 当前段播放失败，跳过
+      // 复用 sharedAudio：只改 src，不重建元素，消除段间"咔哒"
+      sharedAudio.onplay = () => publishState(idx, false);
+      sharedAudio.onpause = () => publishState(idx, sharedAudio.paused);
+      sharedAudio.onerror = () => {
         message.warning({ content: `第 ${idx + 1} 段播放失败，已跳过`, duration: 3 });
         revokeSlot(idx);
-        if (currentAudio === audio) currentAudio = null;
         void playSegment(idx + 1);
       };
-      audio.onended = () => {
+      sharedAudio.onended = () => {
         revokeSlot(idx);
-        if (currentAudio === audio) currentAudio = null;
         void playSegment(idx + 1);
       };
+      sharedAudio.src = slot.url;
+      sharedAudio.playbackRate = ttsRateRef.current;
 
-      // 提前发布一次状态，让进度条立刻跟上
       publishState(idx, false);
       message.destroy(key);
 
       try {
-        await audio.play();
+        await sharedAudio.play();
       } catch (err) {
         if (stopped) return;
         message.error('朗读启动失败：' + (err instanceof Error ? err.message : String(err)));
@@ -1403,27 +1435,29 @@ export default function AppLearning() {
     };
 
     const ctrl: TtsCtrl = {
-      pause: () => { try { currentAudio?.pause(); } catch { /* ignore */ } },
-      resume: () => { try { currentAudio?.play().catch(() => {}); } catch { /* ignore */ } },
+      pause: () => { try { sharedAudio.pause(); } catch { /* ignore */ } },
+      resume: () => { try { sharedAudio.play().catch(() => {}); } catch { /* ignore */ } },
       stop: () => { cleanup(false); },
       seekToSegment: (target: number) => {
         const idx = Math.max(0, Math.min(segments.length - 1, Math.floor(target)));
-        if (idx === currentIdx && currentAudio) {
-          try { currentAudio.currentTime = 0; } catch { /* ignore */ }
-          if (currentAudio.paused) {
-            try { currentAudio.play().catch(() => {}); } catch { /* ignore */ }
+        if (idx === currentIdx && sharedAudio.src) {
+          try { sharedAudio.currentTime = 0; } catch { /* ignore */ }
+          if (sharedAudio.paused) {
+            try { sharedAudio.play().catch(() => {}); } catch { /* ignore */ }
           }
           return;
         }
-        // 释放跳过段，避免内存堆积
         for (let i = currentIdx; i < idx; i++) revokeSlot(i);
-        teardownAudio();
+        // 跳转：清掉事件回调防止旧段 onended 误触发下一段，src 由 playSegment 重设
+        sharedAudio.onended = null;
+        sharedAudio.onerror = null;
+        try { sharedAudio.pause(); } catch { /* ignore */ }
         void playSegment(idx);
       },
       setRate: (rate: number) => {
         const clamped = Math.max(0.5, Math.min(2.0, rate));
         ttsRateRef.current = clamped;
-        if (currentAudio) currentAudio.playbackRate = clamped;
+        sharedAudio.playbackRate = clamped;
       },
     };
     ttsCtrlRef.current = ctrl;
@@ -1581,20 +1615,26 @@ export default function AppLearning() {
       .map((s) => symbolToCN(s))
       .map((s) => (s.length > 2380 ? s.slice(0, 2380) : s));
 
-    // 逐幕并行请求 TTS；某幕失败时退化为静默（该幕仍按字数估时长）。
+    // 逐幕并行请求 TTS；某幕失败/超时时退化为静默（该幕仍按字数估时长）。
+    // 关键：每个 TTS 请求都套 AbortController + 12s 超时，避免单个 hang 把整个视频按钮卡死。
     const perSceneArrayBufs: (ArrayBuffer | null)[] = await Promise.all(
       sceneNarrationTexts.map(async (text) => {
         if (!text) return null;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
         try {
           const ttsRes = await appFetch(`${APP_API_BASE}/tts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text }),
+            signal: controller.signal,
           });
           if (!ttsRes.ok) return null;
-          return await ttsRes.arrayBuffer();
+          return await withTimeout(ttsRes.arrayBuffer(), 8000, 'tts_buffer');
         } catch {
           return null;
+        } finally {
+          clearTimeout(timer);
         }
       })
     );
@@ -1621,7 +1661,7 @@ export default function AppLearning() {
         perSceneArrayBufs.map(async (ab) => {
           if (!ab || ab.byteLength === 0) return null;
           try {
-            return await audioContext!.decodeAudioData(ab.slice(0));
+            return await withTimeout(audioContext!.decodeAudioData(ab.slice(0)), 6000, 'decode_audio');
           } catch {
             return null;
           }
@@ -3207,11 +3247,20 @@ export default function AppLearning() {
                               src={previewUrl}
                               controls
                               playsInline
+                              controlsList="nodownload noremoteplayback"
+                              disablePictureInPicture
+                              onContextMenu={(e) => e.preventDefault()}
                               style={{ maxWidth: 320, maxHeight: 240, borderRadius: 8, background: '#000', alignSelf: 'flex-start' }}
                             />
                           )}
                           {previewUrl && isAudio && (
-                            <audio src={previewUrl} controls style={{ width: '100%', maxWidth: 320 }} />
+                            <audio
+                              src={previewUrl}
+                              controls
+                              controlsList="nodownload noremoteplayback"
+                              onContextMenu={(e) => e.preventDefault()}
+                              style={{ width: '100%', maxWidth: 320 }}
+                            />
                           )}
                           <Space wrap align="center" size={10}>
                             <Tag color="blue" closable onClose={(e) => {

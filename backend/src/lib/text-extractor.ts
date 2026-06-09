@@ -17,11 +17,6 @@ export interface ExtractTextArgs {
   mimeType?: string | null;
 }
 
-function detectTextFromFilename(fileName: string) {
-  const base = path.basename(fileName, path.extname(fileName));
-  return base.replace(/[_-]+/g, ' ').trim();
-}
-
 function resolveUploadFilePath(fileUrl: string) {
   const relative = fileUrl.replace(/^\/+/, '');
   return path.resolve(process.cwd(), relative);
@@ -71,8 +66,10 @@ export async function extractTextFromMaterial(args: ExtractTextArgs): Promise<Ex
   const mimeType = String(args.mimeType || '').toLowerCase();
   const ext = path.extname(fileName).toLowerCase();
 
+  // 不再把文件名当作识别正文 —— 朗读源若为 "IMG_6230" 之类的文件名会与原文无关
+  // 解析失败时统一返回空文本，让前端走 "请先完成识别" 的引导
   const fallback: ExtractTextResult = {
-    text: detectTextFromFilename(fileName),
+    text: '',
     source: 'filename',
     truncated: false,
   };

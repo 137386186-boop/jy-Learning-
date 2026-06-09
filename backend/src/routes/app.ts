@@ -136,6 +136,13 @@ function fixUploadFilename(name: string): string {
   return name;
 }
 
+const MOJIBAKE_HINT_RE = /[ÃÂÐÑØæçðñþäåèéêëìíîïòóôõöùúûüÿ¥»¢£¤¦§¨©ª«¬®¯°±²³´µ¶·¸¹º¼½¾¿]/;
+
+function looksMojibaked(value: string): boolean {
+  if (!value) return false;
+  return MOJIBAKE_HINT_RE.test(value);
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
@@ -1019,7 +1026,10 @@ async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams)
       Math.min(3, Number(params.difficulty) || Number(recognition.suggestedDifficulty) || 1)
     );
 
-    const recognitionText = String(recognition.extractedText || '').trim() || await detectTextFromMaterialContent(content);
+    const storedText = String(recognition.extractedText || '').trim();
+    const recognitionText = (!storedText || looksMojibaked(storedText))
+      ? (await detectTextFromMaterialContent(content)) || storedText
+      : storedText;
 
     const mediaGenerated = await generateProfessionalMedia({
       parentId: params.parentId,
@@ -1102,6 +1112,26 @@ async function processMaterialTaskGeneration(params: GenerateMaterialTaskParams)
   }
 }
 
+async function repairArtifactExtractedTextIfNeeded(material: { id: string; content: unknown }) {
+  const content = (material.content || {}) as Record<string, unknown>;
+  const recognition = (content.recognitionResult || {}) as Record<string, unknown>;
+  const stored = String(recognition.extractedText || '');
+  if (!stored || !looksMojibaked(stored)) return material;
+  try {
+    const fresh = await detectTextFromMaterialContent(content);
+    if (!fresh || looksMojibaked(fresh)) return material;
+    const nextRecognition = { ...recognition, extractedText: fresh };
+    const nextContent = { ...content, recognitionResult: nextRecognition } as unknown as Prisma.InputJsonValue;
+    const updated = await prisma.appArtifact.update({
+      where: { id: material.id },
+      data: { content: nextContent },
+    });
+    return updated;
+  } catch {
+    return material;
+  }
+}
+
 router.get('/library/materials', requireAppParent, async (req: Request, res: Response) => {
   const payload = getParent(req);
   if (!payload) {
@@ -1113,7 +1143,8 @@ router.get('/library/materials', requireAppParent, async (req: Request, res: Res
     orderBy: { createdAt: 'desc' },
     take: 100,
   });
-  res.json(materials);
+  const repaired = await Promise.all(materials.map((m) => repairArtifactExtractedTextIfNeeded(m)));
+  res.json(repaired);
 });
 
 router.post('/library/materials', requireAppParent, writeLimiter, (req, res, next) => {

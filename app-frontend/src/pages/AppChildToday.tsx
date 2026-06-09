@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button, Card, List, Modal, Progress, Space, Tooltip, Typography, message } from 'antd';
 import { APP_API_BASE, appFetch } from '../api.app';
+import { startTtsPlayer, TtsPlayerHandle } from '../lib/tts-player';
 
 interface TodayTask {
   id: string;
@@ -176,12 +177,17 @@ export default function AppChildToday() {
   const [rewardBursts, setRewardBursts] = useState<RewardBurstItem[]>([]);
   const [celebrateSoundEnabled, setCelebrateSoundEnabled] = useState(true);
   const rewardTimerRef = useRef<number | null>(null);
+  const ttsHandleRef = useRef<TtsPlayerHandle | null>(null);
 
   useEffect(() => {
     return () => {
       if (videoPreview?.url?.startsWith('blob:')) URL.revokeObjectURL(videoPreview.url);
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
+      }
+      if (ttsHandleRef.current) {
+        ttsHandleRef.current.stop();
+        ttsHandleRef.current = null;
       }
       if (rewardTimerRef.current) {
         window.clearTimeout(rewardTimerRef.current);
@@ -353,77 +359,87 @@ export default function AppChildToday() {
     }
   };
 
+  const stopCurrentTts = () => {
+    if (ttsHandleRef.current) {
+      ttsHandleRef.current.stop();
+      ttsHandleRef.current = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  };
+
+  const startSegmentTts = (task: TodayTask, label: string) => {
+    const text = getTaskLearningText(task);
+    stopCurrentTts();
+    setSpeakingTaskId(task.id);
+    message.loading({ content: '正在加载学习音频…', key: `child-audio-${task.id}` });
+    ttsHandleRef.current = startTtsPlayer({
+      text,
+      onStart: () => {
+        message.loading({ content: '正在播放学习音频…', key: `child-audio-${task.id}` });
+      },
+      onSegmentSkip: (_idx, reason) => {
+        if (reason && reason !== 'play_failed') {
+          message.warning({ content: `部分内容朗读失败：${reason}`, key: `child-audio-${task.id}-skip` });
+        }
+      },
+      onEnded: () => {
+        setSpeakingTaskId(null);
+        ttsHandleRef.current = null;
+        void reportLearningEvent(task, 'audio');
+        const praise = getPraiseText(task.id);
+        setLastActionHint(praise);
+        message.success({ content: `${praise}${label ? `（${label}）` : ''}`, key: `child-audio-${task.id}` });
+      },
+      onError: (msg) => {
+        setSpeakingTaskId(null);
+        ttsHandleRef.current = null;
+        message.error({ content: msg ? `音频播放失败：${msg}` : '音频播放失败，请重试', key: `child-audio-${task.id}` });
+      },
+    });
+  };
+
   const onPlayAudio = async (task: TodayTask) => {
+    if (speakingTaskId === task.id) {
+      stopCurrentTts();
+      setSpeakingTaskId(null);
+      message.info({ content: '已暂停朗读', key: `child-audio-${task.id}` });
+      return;
+    }
+
     const professionalAudioUrl = resolveMediaUrl(String(task.professionalMedia?.audioUrl || ''));
     const ok = await ensureStarted(task);
     if (!ok) return;
 
     if (professionalAudioUrl) {
+      stopCurrentTts();
       setSpeakingTaskId(task.id);
       message.loading({ content: '正在播放专业音频…', key: `child-audio-${task.id}` });
+      const audio = new Audio(professionalAudioUrl);
+      audio.preload = 'auto';
+      audio.onended = () => {
+        setSpeakingTaskId(null);
+        void reportLearningEvent(task, 'audio');
+        const praise = getPraiseText(task.id);
+        setLastActionHint(praise);
+        message.success({ content: `${praise}（专业音频）`, key: `child-audio-${task.id}` });
+      };
+      audio.onerror = () => {
+        message.warning({ content: '专业音频不可用，已切换分段朗读', key: `child-audio-${task.id}` });
+        startSegmentTts(task, '分段朗读');
+      };
       try {
-        const audio = new Audio(professionalAudioUrl);
-        audio.onended = () => {
-          setSpeakingTaskId(null);
-          void reportLearningEvent(task, 'audio');
-          const praise = getPraiseText(task.id);
-          setLastActionHint(praise);
-          message.success({ content: `${praise}（专业音频）`, key: `child-audio-${task.id}` });
-        };
-        audio.onerror = () => {
-          setSpeakingTaskId(null);
-          message.error({ content: '专业音频播放失败，已切换本地语音', key: `child-audio-${task.id}` });
-          if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
-            const utterance = new SpeechSynthesisUtterance(getTaskLearningText(task));
-            utterance.lang = 'zh-CN';
-            utterance.rate = 0.93;
-            utterance.pitch = 1;
-            utterance.onend = () => {
-              void reportLearningEvent(task, 'audio');
-              const praise = getPraiseText(task.id);
-              setLastActionHint(praise);
-              message.success({ content: praise, key: `child-audio-${task.id}` });
-            };
-            window.speechSynthesis.speak(utterance);
-          }
-        };
         await audio.play();
         return;
       } catch {
-        setSpeakingTaskId(null);
-        message.error({ content: '专业音频暂不可自动播放，已切换本地语音', key: `child-audio-${task.id}` });
+        message.warning({ content: '专业音频暂不可自动播放，已切换分段朗读', key: `child-audio-${task.id}` });
+        startSegmentTts(task, '分段朗读');
+        return;
       }
     }
 
-    const text = getTaskLearningText(task);
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      message.error('当前浏览器不支持音频播放');
-      return;
-    }
-
-    setSpeakingTaskId(task.id);
-    message.loading({ content: '正在播放学习音频…', key: `child-audio-${task.id}` });
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'zh-CN';
-    utterance.rate = 0.93;
-    utterance.pitch = 1;
-
-    utterance.onend = () => {
-      setSpeakingTaskId(null);
-      void reportLearningEvent(task, 'audio');
-      const praise = getPraiseText(task.id);
-      setLastActionHint(praise);
-      message.success({ content: praise, key: `child-audio-${task.id}` });
-    };
-    utterance.onerror = () => {
-      setSpeakingTaskId(null);
-      message.error({ content: '音频播放失败，请重试', key: `child-audio-${task.id}` });
-    };
-
-    window.speechSynthesis.speak(utterance);
+    startSegmentTts(task, '');
   };
 
   const onPlayVideo = async (task: TodayTask) => {
@@ -674,6 +690,18 @@ export default function AppChildToday() {
               src={videoPreview.url}
               controls
               autoPlay
+              playsInline
+              preload="metadata"
+              controlsList="nodownload noremoteplayback"
+              disablePictureInPicture
+              ref={(el) => {
+                if (!el) return;
+                el.setAttribute('webkit-playsinline', 'true');
+                el.setAttribute('x5-playsinline', 'true');
+                el.setAttribute('x5-video-player-type', 'h5');
+                el.setAttribute('x5-video-player-fullscreen', 'false');
+              }}
+              onContextMenu={(e) => e.preventDefault()}
               onEnded={() => {
                 const praise = getPraiseText(videoPreview.taskId);
                 setLastActionHint(praise);

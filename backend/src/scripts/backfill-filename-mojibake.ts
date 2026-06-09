@@ -1,6 +1,7 @@
 import path from 'path';
 import dotenv from 'dotenv';
 import { PrismaClient, Prisma } from '@prisma/client';
+import { extractTextFromMaterial } from '../lib/text-extractor';
 
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -59,7 +60,25 @@ async function main() {
       : '';
 
     const fixedName = original ? fixFilename(original) : null;
-    const fixedText = extractedText ? fixMojibakeText(extractedText) : null;
+    let fixedText = extractedText ? fixMojibakeText(extractedText) : null;
+
+    // Stronger fallback: re-extract from the source file when stored text still
+    // looks mojibaked after the byte-translation attempt.
+    if (!fixedText && extractedText && MOJIBAKE_HINT.test(extractedText)) {
+      const fileUrl = typeof content.fileUrl === 'string' ? content.fileUrl : '';
+      const mimeType = typeof content.mimeType === 'string' ? content.mimeType : '';
+      const fileName = fixedName || (typeof content.fileName === 'string' ? content.fileName : '');
+      if (fileUrl) {
+        try {
+          const out = await extractTextFromMaterial({ fileName, fileUrl, mimeType });
+          if (out.text && !MOJIBAKE_HINT.test(out.text)) {
+            fixedText = out.text;
+          }
+        } catch (e) {
+          console.warn(`[reextract] failed for ${row.id}:`, (e as Error).message);
+        }
+      }
+    }
 
     if (!fixedName && !fixedText) continue;
 
